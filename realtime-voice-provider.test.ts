@@ -1,4 +1,4 @@
-// Anvil Voice tests cover realtime provider bridge behavior.
+// Speech to Speech tests cover realtime provider bridge behavior.
 import {
   REALTIME_VOICE_AUDIO_FORMAT_G711_ULAW_8KHZ,
   REALTIME_VOICE_AUDIO_FORMAT_PCM16_24KHZ,
@@ -182,7 +182,7 @@ describe("buildAnvilRealtimeVoiceProvider", () => {
     const provider = buildAnvilRealtimeVoiceProvider();
 
     expect(provider.id).toBe("anvil");
-    expect(provider.label).toBe("Anvil Voice");
+    expect(provider.label).toBe("Speech to Speech");
     expect(provider.defaultModel).toBe("fast-local");
     expect(provider.capabilities).toEqual({
       transports: ["gateway-relay"],
@@ -335,7 +335,7 @@ describe("buildAnvilRealtimeVoiceProvider", () => {
     await rejected;
     expect(onError).toHaveBeenCalledWith(
       expect.objectContaining({
-        message: "Anvil Voice realtime session.updated timed out",
+        message: "Speech to Speech realtime session.updated timed out",
       }),
     );
   });

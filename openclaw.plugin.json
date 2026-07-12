@@ -1,7 +1,7 @@
 {
-  "id": "anvil-voice",
-  "name": "Anvil Voice",
-  "description": "Anvil Voice realtime speech-to-speech provider over the OpenClaw Gateway relay",
+  "id": "speech-to-speech",
+  "name": "Speech to Speech",
+  "description": "Realtime speech-to-speech voice provider over the OpenClaw Gateway relay",
   "activation": {
     "onStartup": false
   },
@@ -17,18 +17,18 @@
     "properties": {
       "realtimeUrl": {
         "type": "string",
-        "description": "Anvil Voice realtime WebSocket URL."
+        "description": "Realtime backend WebSocket URL."
       },
       "baseUrl": {
         "type": "string",
-        "description": "Anvil Voice HTTP or WebSocket base URL; /v1/realtime is appended when needed."
+        "description": "Realtime backend HTTP or WebSocket base URL; /v1/realtime is appended when needed."
       },
       "apiKey": {
         "type": [
           "string",
           "object"
         ],
-        "description": "Optional bearer token or secret reference for non-loopback Anvil Voice endpoints."
+        "description": "Optional bearer token or secret reference for non-loopback realtime endpoints."
       },
       "token": {
         "type": [

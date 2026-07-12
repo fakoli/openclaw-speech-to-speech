@@ -1,4 +1,4 @@
-// Anvil Voice provider module bridges OpenClaw Talk gateway relay to Anvil /v1/realtime.
+// Speech to Speech provider module bridges OpenClaw Talk gateway relay to Anvil /v1/realtime.
 import { randomUUID } from "node:crypto";
 import type {
   RealtimeVoiceAudioFormat,
@@ -23,7 +23,7 @@ import WebSocket from "ws";
 import type { RawData } from "ws";
 
 const ANVIL_REALTIME_PROVIDER_ID = "anvil";
-const ANVIL_REALTIME_LABEL = "Anvil Voice";
+const ANVIL_REALTIME_LABEL = "Speech to Speech";
 const ANVIL_REALTIME_DEFAULT_MODEL = "fast-local";
 const ANVIL_REALTIME_SAMPLE_RATE_HZ = 16_000;
 const ANVIL_REALTIME_DEFAULT_SILENCE_DURATION_MS = 200;
@@ -156,7 +156,7 @@ function normalizeRealtimeUrl(rawUrl: string, options: { appendRealtimePath: boo
     parsed = new URL(rawUrl);
   } catch (error) {
     throw new Error(
-      `Anvil Voice realtime URL is invalid: ${error instanceof Error ? error.message : String(error)}`,
+      `Speech to Speech realtime URL is invalid: ${error instanceof Error ? error.message : String(error)}`,
       { cause: error },
     );
   }
@@ -166,23 +166,23 @@ function normalizeRealtimeUrl(rawUrl: string, options: { appendRealtimePath: boo
   } else if (parsed.protocol === "https:") {
     parsed.protocol = "wss:";
   } else if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") {
-    throw new Error("Anvil Voice realtime URL must use ws://, wss://, http://, or https://");
+    throw new Error("Speech to Speech realtime URL must use ws://, wss://, http://, or https://");
   }
   if (parsed.username || parsed.password || parsed.search || parsed.hash) {
     throw new Error(
-      "Anvil Voice realtime URL must not include credentials, query strings, or fragments",
+      "Speech to Speech realtime URL must not include credentials, query strings, or fragments",
     );
   }
 
   const hostname = parsed.hostname.toLowerCase().replace(/\.+$/u, "");
   if (hostname === LOOPBACK_HOSTNAME_ALIAS) {
     throw new Error(
-      "Anvil Voice realtime URL must use 127.0.0.1 instead of a loopback hostname alias",
+      "Speech to Speech realtime URL must use 127.0.0.1 instead of a loopback hostname alias",
     );
   }
   if (parsed.protocol === "ws:" && !isTrustedPlaintextHost(parsed.hostname)) {
     throw new Error(
-      "Anvil Voice ws:// URLs must target loopback, private, .local, or .ts.net hosts; use wss:// for public hosts",
+      "Speech to Speech ws:// URLs must target loopback, private, .local, or .ts.net hosts; use wss:// for public hosts",
     );
   }
 
@@ -242,7 +242,7 @@ function rawDataToString(data: RawData): string {
 }
 
 function readErrorMessage(event: AnvilRealtimeEvent): string {
-  return event.error?.message?.trim() || event.error?.type?.trim() || "Anvil Voice realtime error";
+  return event.error?.message?.trim() || event.error?.type?.trim() || "Speech to Speech realtime error";
 }
 
 function normalizeAnvilRealtimeTools(
@@ -294,7 +294,7 @@ class AnvilRealtimeVoiceBridge implements RealtimeVoiceBridge {
       this.resolveConnect = resolve;
       this.rejectConnect = reject;
       this.connectTimer = setTimeout(() => {
-        const error = new Error("Anvil Voice realtime session.updated timed out");
+        const error = new Error("Speech to Speech realtime session.updated timed out");
         this.config.onError?.(error);
         this.settleConnectError(error);
         this.socket?.close(1011, "session.updated timeout");
@@ -325,7 +325,7 @@ class AnvilRealtimeVoiceBridge implements RealtimeVoiceBridge {
         this.socket = null;
         const detail = `code=${code} reason=${reason.toString("utf8") || "none"}`;
         if (!this.intentionallyClosed) {
-          const error = new Error(`Anvil Voice realtime WebSocket closed: ${detail}`);
+          const error = new Error(`Speech to Speech realtime WebSocket closed: ${detail}`);
           this.settleConnectError(error);
           this.config.onError?.(error);
           this.config.onClose?.("error");
@@ -582,14 +582,14 @@ class AnvilRealtimeVoiceBridge implements RealtimeVoiceBridge {
     } catch (error) {
       this.config.onError?.(
         new Error(
-          `Anvil Voice realtime sent invalid JSON: ${error instanceof Error ? error.message : String(error)}`,
+          `Speech to Speech realtime sent invalid JSON: ${error instanceof Error ? error.message : String(error)}`,
         ),
       );
       return;
     }
     const type = event.type;
     if (!type) {
-      this.config.onError?.(new Error("Anvil Voice realtime event missing type"));
+      this.config.onError?.(new Error("Speech to Speech realtime event missing type"));
       return;
     }
     this.config.onEvent?.({
@@ -670,7 +670,7 @@ class AnvilRealtimeVoiceBridge implements RealtimeVoiceBridge {
     } catch (error) {
       this.config.onError?.(
         new Error(
-          `Anvil Voice realtime audio delta decode failed: ${error instanceof Error ? error.message : String(error)}`,
+          `Speech to Speech realtime audio delta decode failed: ${error instanceof Error ? error.message : String(error)}`,
         ),
       );
     }
@@ -763,7 +763,7 @@ class AnvilRealtimeVoiceBridge implements RealtimeVoiceBridge {
     } catch (error) {
       this.config.onError?.(
         new Error(
-          `Anvil Voice function-call arguments were invalid JSON for ${callId}: ${
+          `Speech to Speech function-call arguments were invalid JSON for ${callId}: ${
             error instanceof Error ? error.message : String(error)
           }`,
         ),
@@ -836,7 +836,7 @@ export function buildAnvilRealtimeVoiceProvider(): RealtimeVoiceProviderPlugin {
     createBridge: (req) => {
       const config = normalizeProviderConfig(req.providerConfig);
       if (!config.realtimeUrl) {
-        throw new Error("Anvil Voice realtime URL missing");
+        throw new Error("Speech to Speech realtime URL missing");
       }
       return new AnvilRealtimeVoiceBridge({
         ...req,

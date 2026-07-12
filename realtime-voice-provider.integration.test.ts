@@ -1,4 +1,4 @@
-// Anvil Voice integration tests use a daemonless in-process realtime WebSocket server.
+// Speech to Speech integration tests use a daemonless in-process realtime WebSocket server.
 import { once } from "node:events";
 import type { AddressInfo } from "node:net";
 import {

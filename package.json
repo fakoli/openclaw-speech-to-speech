@@ -1,12 +1,12 @@
 {
-  "name": "@fakoli/openclaw-anvil-voice",
+  "name": "@fakoli/openclaw-speech-to-speech",
   "version": "0.1.0",
-  "description": "Anvil Voice realtime speech-to-speech provider plugin for OpenClaw",
+  "description": "Realtime speech-to-speech voice provider plugin for OpenClaw",
   "type": "module",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/fakoli/openclaw-anvil-voice.git"
+    "url": "git+https://github.com/fakoli/openclaw-speech-to-speech.git"
   },
   "files": [
     "dist",
@@ -31,7 +31,9 @@
     "vitest": "^4.0.0"
   },
   "openclaw": {
-    "extensions": ["./dist/index.js"],
+    "extensions": [
+      "./dist/index.js"
+    ],
     "compat": {
       "pluginApi": ">=2026.6.11",
       "minGatewayVersion": "2026.6.11"

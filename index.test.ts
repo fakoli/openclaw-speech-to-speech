@@ -1,4 +1,4 @@
-// Anvil Voice tests cover plugin entrypoint registration.
+// Speech to Speech tests cover plugin entrypoint registration.
 import type { RealtimeVoiceProviderPlugin } from "openclaw/plugin-sdk/realtime-voice";
 import { describe, expect, it } from "vitest";
 import anvilVoicePlugin from "./index.js";
@@ -19,6 +19,6 @@ describe("anvil voice plugin entrypoint", () => {
     anvilVoicePlugin.register(api);
 
     expect(realtimeProvider?.id).toBe("anvil");
-    expect(realtimeProvider?.label).toBe("Anvil Voice");
+    expect(realtimeProvider?.label).toBe("Speech to Speech");
   });
 });

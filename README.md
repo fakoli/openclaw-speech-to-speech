@@ -1,6 +1,6 @@
-# OpenClaw Anvil Voice
+# OpenClaw Speech to Speech
 
-Anvil Voice realtime speech-to-speech provider plugin for [OpenClaw](https://openclaw.ai).
+Realtime speech-to-speech voice provider plugin for [OpenClaw](https://openclaw.ai).
 Bridges OpenClaw Talk's Gateway relay to an Anvil `/v1/realtime` WebSocket
 endpoint: audio stays server-side, tool calls route through OpenClaw's
 `openclaw_agent_consult` policy, and browsers only ever speak authenticated
@@ -11,15 +11,15 @@ Runs against stock OpenClaw `>=2026.6.11` — no fork required.
 ## Install
 
 ```bash
-openclaw plugins install @fakoli/openclaw-anvil-voice
+openclaw plugins install @fakoli/openclaw-speech-to-speech
 ```
 
 Or from a local checkout while developing:
 
 ```bash
 npm install && npm pack --pack-destination /tmp
-openclaw plugins install npm-pack:/tmp/fakoli-openclaw-anvil-voice-0.1.0.tgz --force
-openclaw plugins inspect anvil-voice --runtime --json
+openclaw plugins install npm-pack:/tmp/fakoli-openclaw-speech-to-speech-0.1.0.tgz --force
+openclaw plugins inspect speech-to-speech --runtime --json
 ```
 
 ## Configure
