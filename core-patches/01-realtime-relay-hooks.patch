@@ -1,0 +1,328 @@
+diff --git a/extensions/voice-call/src/webhook/realtime-handler.test.ts b/extensions/voice-call/src/webhook/realtime-handler.test.ts
+index f70c0466b0..e1b5bf95ef 100644
+--- a/extensions/voice-call/src/webhook/realtime-handler.test.ts
++++ b/extensions/voice-call/src/webhook/realtime-handler.test.ts
+@@ -1,10 +1,11 @@
+ // Voice Call tests cover realtime handler plugin behavior.
+ import http from "node:http";
+-import type {
+-  RealtimeVoiceBridge,
+-  RealtimeVoiceForcedConsultCoordinator,
+-  RealtimeVoiceProviderPlugin,
+-  RealtimeVoiceToolCallEvent,
++import {
++  REALTIME_VOICE_AUDIO_FORMAT_G711_ULAW_8KHZ,
++  type RealtimeVoiceBridge,
++  type RealtimeVoiceForcedConsultCoordinator,
++  type RealtimeVoiceProviderPlugin,
++  type RealtimeVoiceToolCallEvent,
+ } from "openclaw/plugin-sdk/realtime-voice";
+ import { afterEach, describe, expect, it, vi } from "vitest";
+ import { WebSocket, type RawData } from "ws";
+@@ -621,6 +622,9 @@ describe("RealtimeCallHandler path routing", () => {
+         await waitForRealtimeTest(() => {
+           expect(createBridge).toHaveBeenCalled();
+         });
++        expect(createBridge.mock.calls[0]?.[0].audioFormat).toEqual(
++          REALTIME_VOICE_AUDIO_FORMAT_G711_ULAW_8KHZ,
++        );
+ 
+         callbacks?.onReady?.();
+ 
+diff --git a/extensions/voice-call/src/webhook/realtime-handler.ts b/extensions/voice-call/src/webhook/realtime-handler.ts
+index cef5b87ea7..e52c5b89ab 100644
+--- a/extensions/voice-call/src/webhook/realtime-handler.ts
++++ b/extensions/voice-call/src/webhook/realtime-handler.ts
+@@ -13,6 +13,7 @@ import {
+   createRealtimeVoiceForcedConsultCoordinator,
+   createTalkSessionController,
+   createRealtimeVoiceBridgeSession,
++  REALTIME_VOICE_AUDIO_FORMAT_G711_ULAW_8KHZ,
+   REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME,
+   readRealtimeVoiceConsultQuestion,
+   readSpeakableRealtimeVoiceToolResult,
+@@ -723,6 +724,7 @@ export class RealtimeCallHandler {
+       cfg: this.coreConfig,
+       providerConfig: this.providerConfig,
+       interruptResponseOnInputAudio,
++      audioFormat: REALTIME_VOICE_AUDIO_FORMAT_G711_ULAW_8KHZ,
+       instructions,
+       tools: this.config.tools,
+       initialGreetingInstructions,
+diff --git a/packages/gateway-protocol/src/index.test.ts b/packages/gateway-protocol/src/index.test.ts
+index 0a8da43b8c..00f8edb1a2 100644
+--- a/packages/gateway-protocol/src/index.test.ts
++++ b/packages/gateway-protocol/src/index.test.ts
+@@ -422,6 +422,7 @@ describe("validateTalkConfigResult", () => {
+               brain: "agent-consult",
+               consultRouting: "force-agent-consult",
+             },
++            consultBootstrapContextMode: "lightweight",
+           },
+         },
+       }),
+@@ -448,6 +449,12 @@ describe("validateTalkCatalogResult", () => {
+               label: "Google Live Voice",
+               configured: true,
+             },
++            {
++              id: "anvil",
++              label: "Anvil Voice",
++              configured: true,
++              defaultConsultRouting: "force-agent-consult",
++            },
+           ],
+         },
+       }),
+@@ -895,6 +902,7 @@ describe("validateChatSendParams", () => {
+     ).toBe(true);
+     expect(validateChatSendParams({ ...base, fastAutoOnSeconds: 2 })).toBe(true);
+     expect(validateChatSendParams({ ...base, fastAutoOnSeconds: 0 })).toBe(false);
++    expect(validateChatSendParams({ ...base, toolsAllow: ["read", "exec"] })).toBe(false);
+   });
+ });
+ 
+diff --git a/packages/gateway-protocol/src/schema/channels.ts b/packages/gateway-protocol/src/schema/channels.ts
+index be4a045610..981f29dfde 100644
+--- a/packages/gateway-protocol/src/schema/channels.ts
++++ b/packages/gateway-protocol/src/schema/channels.ts
+@@ -461,6 +461,9 @@ const TalkCatalogProviderSchema = Type.Object(
+     supportsToolCalls: Type.Optional(Type.Boolean()),
+     supportsVideoFrames: Type.Optional(Type.Boolean()),
+     supportsSessionResumption: Type.Optional(Type.Boolean()),
++    defaultConsultRouting: Type.Optional(
++      Type.Union([Type.Literal("provider-direct"), Type.Literal("force-agent-consult")]),
++    ),
+   },
+   { additionalProperties: false },
+ );
+@@ -662,6 +665,11 @@ const TalkConfigSchema = Type.Object(
+     resolved: Type.Optional(ResolvedTalkConfigSchema),
+     consultThinkingLevel: Type.Optional(Type.String()),
+     consultFastMode: Type.Optional(Type.Boolean()),
++    consultModel: Type.Optional(Type.String({ minLength: 1 })),
++    consultBootstrapContextMode: Type.Optional(
++      Type.Union([Type.Literal("full"), Type.Literal("lightweight")]),
++    ),
++    consultToolsAllow: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { minItems: 1 })),
+     speechLocale: Type.Optional(Type.String()),
+     interruptOnSpeech: Type.Optional(Type.Boolean()),
+     silenceTimeoutMs: Type.Optional(Type.Integer({ minimum: 1 })),
+diff --git a/src/gateway/talk-realtime-relay.test.ts b/src/gateway/talk-realtime-relay.test.ts
+index d0e615ee74..8309f45708 100644
+--- a/src/gateway/talk-realtime-relay.test.ts
++++ b/src/gateway/talk-realtime-relay.test.ts
+@@ -1055,6 +1055,96 @@ describe("talk realtime gateway relay", () => {
+     stopTalkRealtimeRelaySession({ relaySessionId: session.relaySessionId, connId: "conn-1" });
+   });
+ 
++  it("does not force another consult when the provider echoes relay-injected speech prompts", async () => {
++    vi.useFakeTimers();
++
++    let bridgeRequest: RealtimeVoiceBridgeCreateRequest | undefined;
++    const bridge = {
++      supportsToolResultContinuation: true,
++      connect: vi.fn(async () => undefined),
++      sendAudio: vi.fn(),
++      setMediaTimestamp: vi.fn(),
++      sendUserMessage: vi.fn(),
++      triggerGreeting: vi.fn(),
++      handleBargeIn: vi.fn(),
++      submitToolResult: vi.fn(),
++      acknowledgeMark: vi.fn(),
++      close: vi.fn(),
++      isConnected: vi.fn(() => true),
++    };
++    const provider: RealtimeVoiceProviderPlugin = {
++      id: "relay-test",
++      label: "Relay Test",
++      isConfigured: () => true,
++      createBridge: (req) => {
++        bridgeRequest = req;
++        return bridge;
++      },
++    };
++    const events: Array<{ event: string; payload: unknown; connIds: string[] }> = [];
++    const context = {
++      broadcastToConnIds: (event: string, payload: unknown, connIds: ReadonlySet<string>) => {
++        events.push({ event, payload, connIds: [...connIds] });
++      },
++    } as never;
++
++    const session = createTalkRealtimeRelaySession({
++      context,
++      connId: "conn-1",
++      provider,
++      providerConfig: {},
++      instructions: "be brief",
++      tools: [],
++      forceAgentConsultOnFinalTranscript: true,
++    });
++    await Promise.resolve();
++
++    const countForcedToolCalls = () =>
++      events.filter((entry) => {
++        const payload = entry.payload;
++        return (
++          typeof payload === "object" &&
++          payload !== null &&
++          (payload as Record<string, unknown>).type === "toolCall" &&
++          (payload as Record<string, unknown>).forced === true
++        );
++      }).length;
++
++    bridgeRequest?.onTranscript?.("user", "Can you check this?", true);
++    await vi.advanceTimersByTimeAsync(250);
++    expect(countForcedToolCalls()).toBe(1);
++
++    const forcedToolCall = findEventPayload(
++      events,
++      (payload) => payload.type === "toolCall" && payload.forced === true,
++    );
++    const callId = String(forcedToolCall.callId);
++    void submitTalkRealtimeRelayToolResult({
++      relaySessionId: session.relaySessionId,
++      connId: "conn-1",
++      callId,
++      result: { status: "working" },
++      options: { willContinue: true },
++    });
++    bridgeRequest?.onTranscript?.("user", String(mockCallArg(bridge.sendUserMessage)), true);
++    await vi.advanceTimersByTimeAsync(250);
++    expect(countForcedToolCalls()).toBe(1);
++
++    void submitTalkRealtimeRelayToolResult({
++      relaySessionId: session.relaySessionId,
++      connId: "conn-1",
++      callId,
++      result: { result: "Here is the checked answer." },
++    });
++    bridgeRequest?.onTranscript?.("user", String(mockCallArg(bridge.sendUserMessage, 1)), true);
++    await vi.advanceTimersByTimeAsync(250);
++    expect(countForcedToolCalls()).toBe(1);
++
++    bridgeRequest?.onTranscript?.("user", "Can you check something else?", true);
++    await vi.advanceTimersByTimeAsync(250);
++    expect(countForcedToolCalls()).toBe(2);
++  });
++
+   it("uses the actual forced result when one native call cannot suppress responses", async () => {
+     const fixture = await createSuppressionUnsupportedForcedConsultFixture(["native-call"]);
+     const accepted = createDeferredVoid();
+diff --git a/src/gateway/talk-realtime-relay.ts b/src/gateway/talk-realtime-relay.ts
+index 344ac2ed81..96bc88312c 100644
+--- a/src/gateway/talk-realtime-relay.ts
++++ b/src/gateway/talk-realtime-relay.ts
+@@ -148,6 +148,7 @@ type RelaySession = {
+   toolResultEpoch: number;
+   forcedConsults: RealtimeVoiceForcedConsultCoordinator;
+   transcript: RealtimeVoiceTranscriptEntry[];
++  pendingSyntheticUserTranscripts: Map<string, number>;
+ };
+ 
+ type TalkRealtimeRelayIssue = {
+@@ -240,6 +241,38 @@ function isRelayAssistantEchoTranscript(session: RelaySession | undefined, text:
+     lookbackMs: RELAY_TRANSCRIPT_ECHO_LOOKBACK_MS,
+   });
+ }
++
++function normalizeSyntheticUserTranscript(text: string): string {
++  return text.trim();
++}
++
++function sendSyntheticUserMessage(session: RelaySession, text: string): void {
++  const transcript = normalizeSyntheticUserTranscript(text);
++  if (transcript) {
++    session.pendingSyntheticUserTranscripts.set(
++      transcript,
++      (session.pendingSyntheticUserTranscripts.get(transcript) ?? 0) + 1,
++    );
++  }
++  session.bridge.sendUserMessage(text);
++}
++
++function consumeSyntheticUserTranscript(session: RelaySession | undefined, text: string): boolean {
++  if (!session) {
++    return false;
++  }
++  const transcript = normalizeSyntheticUserTranscript(text);
++  const pending = transcript ? session.pendingSyntheticUserTranscripts.get(transcript) : undefined;
++  if (!pending) {
++    return false;
++  }
++  if (pending === 1) {
++    session.pendingSyntheticUserTranscripts.delete(transcript);
++  } else {
++    session.pendingSyntheticUserTranscripts.set(transcript, pending - 1);
++  }
++  return true;
++}
+ function buildForcedConsultCheckingPrompt(): string {
+   return [
+     "Briefly tell the person that you are checking with OpenClaw.",
+@@ -768,6 +801,9 @@ export function createTalkRealtimeRelaySession(
+         if (isRelayAssistantEchoTranscript(relay, question)) {
+           return;
+         }
++        if (consumeSyntheticUserTranscript(relay, question)) {
++          return;
++        }
+         if (
+           relay &&
+           pruneInactiveRelayAgentRuns(relay) > 0 &&
+@@ -782,7 +818,10 @@ export function createTalkRealtimeRelaySession(
+           })
+             .then((result) => {
+               if (result.speak && !result.suppress && result.message.trim()) {
+-                bridge.sendUserMessage(buildRealtimeVoiceAgentControlSpeechMessage(result.message));
++                sendSyntheticUserMessage(
++                  relay,
++                  buildRealtimeVoiceAgentControlSpeechMessage(result.message),
++                );
+               }
+             })
+             .catch((error: unknown) => {
+@@ -926,6 +965,7 @@ export function createTalkRealtimeRelaySession(
+     toolResultEpoch: 0,
+     forcedConsults: createRealtimeVoiceForcedConsultCoordinator(),
+     transcript: [],
++    pendingSyntheticUserTranscripts: new Map(),
+   };
+   relayRef.current = relay;
+   relay.cleanupTimer.unref?.();
+@@ -1230,7 +1270,7 @@ export function submitTalkRealtimeRelayToolResult(params: {
+     const final = params.options?.willContinue !== true;
+     if (!final) {
+       if (isWorkingToolResult(params.result)) {
+-        session.bridge.sendUserMessage(buildForcedConsultCheckingPrompt());
++        sendSyntheticUserMessage(session, buildForcedConsultCheckingPrompt());
+       }
+       broadcastToolResultToOwner(session, {
+         callId: params.callId,
+@@ -1269,7 +1309,7 @@ export function submitTalkRealtimeRelayToolResult(params: {
+       session.completedAgentToolCalls.add(params.callId);
+       const hasNativeCalls = session.forcedConsults.nativeCallIds(forcedConsult).length > 0;
+       if (text && (!hasNativeCalls || providerOptions)) {
+-        session.bridge.sendUserMessage(buildForcedConsultSpeechPrompt(text));
++        sendSyntheticUserMessage(session, buildForcedConsultSpeechPrompt(text));
+       }
+       broadcastToolResultToOwner(session, {
+         callId: params.callId,
+diff --git a/src/talk/provider-types.ts b/src/talk/provider-types.ts
+index ebec88633c..49c8ca68fc 100644
+--- a/src/talk/provider-types.ts
++++ b/src/talk/provider-types.ts
+@@ -1,4 +1,5 @@
+ // Talk provider types describe realtime voice provider configuration and APIs.
++import type { TalkRealtimeConfig } from "../config/types.gateway.js";
+ import type { OpenClawConfig } from "../config/types.openclaw.js";
+ import type { TalkTransport } from "./talk-events.js";
+ 
+@@ -94,6 +95,7 @@ export type RealtimeVoiceProviderCapabilities = {
+   supportsToolCalls?: boolean;
+   supportsVideoFrames?: boolean;
+   supportsSessionResumption?: boolean;
++  defaultConsultRouting?: TalkRealtimeConfig["consultRouting"];
+ };
+ 
+ export type RealtimeVoiceProviderResolveConfigContext = {

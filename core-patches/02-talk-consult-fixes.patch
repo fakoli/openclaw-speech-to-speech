@@ -1,0 +1,885 @@
+diff --git a/src/auto-reply/reply/get-reply.fast-path.runtime.test.ts b/src/auto-reply/reply/get-reply.fast-path.runtime.test.ts
+index 7d6c67482e..bc78b66098 100644
+--- a/src/auto-reply/reply/get-reply.fast-path.runtime.test.ts
++++ b/src/auto-reply/reply/get-reply.fast-path.runtime.test.ts
+@@ -88,6 +88,42 @@ describe("getReplyFromConfig fast-path runtime", () => {
+     });
+   });
+ 
++  it("uses an internal runtime model override for one embedded run", async () => {
++    await withTempHome(async (home) => {
++      agentMocks.loadModelCatalog.mockResolvedValue([
++        { id: "claude-opus-4-6", name: "Opus 4.5", provider: "anthropic" },
++        { id: "chat-fast", name: "Anvil Chat Fast", provider: "anvil" },
++      ]);
++      agentMocks.runEmbeddedAgent.mockResolvedValue(makeEmbeddedTextResult("ok"));
++
++      const res = await getReplyFromConfig(
++        {
++          Body: "what is the weather?",
++          BodyForAgent: "what is the weather?",
++          RawBody: "what is the weather?",
++          CommandBody: "what is the weather?",
++          From: "+1001",
++          To: "+2000",
++          SessionKey: "agent:main:whatsapp:+2000",
++          Provider: "whatsapp",
++          Surface: "whatsapp",
++          ChatType: "direct",
++        },
++        { runtimeModelOverride: "anvil/chat-fast" } as never,
++        makeReplyConfig(home) as OpenClawConfig,
++      );
++
++      const text = Array.isArray(res) ? res[0]?.text : res?.text;
++      expect(text).toBe("ok");
++      expect(agentMocks.runEmbeddedAgent).toHaveBeenCalledWith(
++        expect.objectContaining({
++          provider: "anvil",
++          model: "chat-fast",
++        }),
++      );
++    });
++  });
++
+   it("routes structured native command turns through the target session before legacy sync", async () => {
+     await withTempHome(async (home) => {
+       agentMocks.runEmbeddedAgent.mockResolvedValue(makeEmbeddedTextResult("ok"));
+diff --git a/src/auto-reply/reply/get-reply.ts b/src/auto-reply/reply/get-reply.ts
+index f5191d8b00..3410043e49 100644
+--- a/src/auto-reply/reply/get-reply.ts
++++ b/src/auto-reply/reply/get-reply.ts
+@@ -681,6 +681,26 @@ export async function getReplyFromConfig(
+       : null;
+   const primaryProvider = resolvedChannelModelOverride?.ref.provider ?? defaultProvider;
+   const primaryModel = resolvedChannelModelOverride?.ref.model ?? defaultModel;
++  const runtimeModelOverrideRaw = normalizeOptionalString(
++    internalResolvedOpts?.runtimeModelOverride,
++  );
++  const runtimeModelOverrideRef = runtimeModelOverrideRaw
++    ? resolveModelRefFromString({
++        raw: runtimeModelOverrideRaw,
++        defaultProvider,
++        aliasIndex,
++      })?.ref
++    : undefined;
++  const applyRuntimeModelOverride = (): boolean => {
++    // Locked sessions pin their model selection; the one-shot runtime override
++    // must not bypass the lock or createModelSelectionState throws downstream.
++    if (!runtimeModelOverrideRef || sessionModelSelectionLocked) {
++      return false;
++    }
++    provider = runtimeModelOverrideRef.provider;
++    model = runtimeModelOverrideRef.model;
++    return true;
++  };
+   const hasSessionModelOverride = Boolean(
+     normalizeOptionalString(sessionEntry.modelOverride) ||
+     normalizeOptionalString(sessionEntry.providerOverride),
+@@ -744,6 +764,7 @@ export async function getReplyFromConfig(
+     provider = resolvedChannelModelOverride.ref.provider;
+     model = resolvedChannelModelOverride.ref.model;
+   }
++  applyRuntimeModelOverride();
+ 
+   if (
+     shouldUseReplyFastDirectiveExecution({
+@@ -883,7 +904,7 @@ export async function getReplyFromConfig(
+     resolvedBlockStreamingBreak,
+     provider: resolvedProvider,
+     model: resolvedModel,
+-    modelState,
++    modelState: resolvedDirectiveModelState,
+     contextTokens,
+     inlineStatusRequested,
+     directiveAck,
+@@ -894,6 +915,46 @@ export async function getReplyFromConfig(
+     directiveResult.result;
+   provider = resolvedProvider;
+   model = resolvedModel;
++  let modelState = resolvedDirectiveModelState;
++  if (
++    runtimeModelOverrideRef &&
++    !sessionModelSelectionLocked &&
++    (provider !== runtimeModelOverrideRef.provider || model !== runtimeModelOverrideRef.model)
++  ) {
++    provider = runtimeModelOverrideRef.provider;
++    model = runtimeModelOverrideRef.model;
++    try {
++      modelState = await createModelSelectionState({
++        cfg,
++        agentId,
++        agentCfg,
++        sessionEntry,
++        sessionStore,
++        sessionKey,
++        parentSessionKey:
++          sessionEntry.parentSessionKey ??
++          sessionCtx.ModelParentSessionKey ??
++          sessionCtx.ParentSessionKey,
++        storePath,
++        defaultProvider,
++        defaultModel,
++        primaryProvider,
++        primaryModel,
++        provider,
++        model,
++        hasModelDirective: false,
++        skipStoredModelOverride: true,
++        hasResolvedHeartbeatModelOverride,
++        isHeartbeat: opts?.isHeartbeat === true,
++      });
++    } catch (error) {
++      if (!isSessionWorkStartInvalidatedError(error)) {
++        throw error;
++      }
++      typing.cleanup();
++      return { text: error.message };
++    }
++  }
+ 
+   const maybeEmitMissingResetHooks = async () => {
+     if (!resetTriggered || !command.isAuthorizedSender || command.resetHookTriggered) {
+diff --git a/src/auto-reply/reply/get-reply.types.ts b/src/auto-reply/reply/get-reply.types.ts
+index c461a3912b..172356ba42 100644
+--- a/src/auto-reply/reply/get-reply.types.ts
++++ b/src/auto-reply/reply/get-reply.types.ts
+@@ -17,6 +17,8 @@ type InternalReplySessionOptions = {
+   requestedSessionId?: string;
+   resumeRequestedSession?: boolean;
+   sessionPromptSourceReplyDeliveryMode?: GetReplyOptions["sourceReplyDeliveryMode"];
++  /** One-shot model override for trusted gateway-owned runtime calls; never persisted. */
++  runtimeModelOverride?: string;
+   /** Marks queued follow-up admission waits on an older owner's delivery barrier. */
+   onFollowupAdmissionWaitChange?: (waiting: boolean) => void;
+ };
+diff --git a/src/config/schema.help.quality.test.ts b/src/config/schema.help.quality.test.ts
+index 92d725751c..5f6cef3835 100644
+--- a/src/config/schema.help.quality.test.ts
++++ b/src/config/schema.help.quality.test.ts
+@@ -340,6 +340,9 @@ const TARGET_KEYS = [
+   "gateway.controlUi.embedSandbox",
+   "talk",
+   "talk.consultFastMode",
++  "talk.consultModel",
++  "talk.consultBootstrapContextMode",
++  "talk.consultToolsAllow",
+   "talk.interruptOnSpeech",
+   "talk.silenceTimeoutMs",
+   "talk.consultThinkingLevel",
+diff --git a/src/config/schema.help.ts b/src/config/schema.help.ts
+index 9016805377..d1b16322c3 100644
+--- a/src/config/schema.help.ts
++++ b/src/config/schema.help.ts
+@@ -248,11 +248,17 @@ export const FIELD_HELP: Record<string, string> = {
+   "talk.realtime.brain":
+     "Talk reasoning strategy: agent-consult for Gateway-mediated agent help, direct-tools for local tool calls, or none.",
+   "talk.realtime.consultRouting":
+-    "Gateway relay fallback for final user transcripts when the realtime provider skips openclaw_agent_consult. provider-direct preserves provider replies; force-agent-consult routes through OpenClaw.",
++    "Gateway relay fallback for final user transcripts when the realtime provider skips openclaw_agent_consult. provider-direct preserves provider replies; force-agent-consult routes through OpenClaw. When unset, providers may supply their own default.",
+   "talk.consultThinkingLevel":
+     "Use this to override the thinking level for the regular agent run behind Talk realtime consults.",
+   "talk.consultFastMode":
+     "Use this to set true or false fast mode for the regular agent run behind Talk realtime consults.",
++  "talk.consultModel":
++    'Use this one-shot model override for the regular agent run behind Talk realtime consults, for example "anvil/chat-fast". This does not change the session model.',
++  "talk.consultBootstrapContextMode":
++    'Use "lightweight" to skip workspace bootstrap-file injection for Talk realtime consults, or "full" to preserve the normal agent bootstrap context.',
++  "talk.consultToolsAllow":
++    "Use this optional runtime tool allowlist for embedded Talk realtime consults to keep the voice path on a small voice-safe tool set, reducing prompt size and latency while preserving the tools Talk needs.",
+   "talk.speechLocale":
+     'BCP 47 locale id for Talk speech recognition on device nodes, for example "ru-RU". Leave unset to use each device default.',
+   "talk.interruptOnSpeech":
+diff --git a/src/config/schema.labels.ts b/src/config/schema.labels.ts
+index a0a4045dc8..ed67568bb8 100644
+--- a/src/config/schema.labels.ts
++++ b/src/config/schema.labels.ts
+@@ -1006,6 +1006,9 @@ export const FIELD_LABELS: Record<string, string> = {
+   "talk.silenceTimeoutMs": "Talk Silence Timeout (ms)",
+   "talk.consultThinkingLevel": "Talk Consult Thinking Level",
+   "talk.consultFastMode": "Talk Consult Fast Mode",
++  "talk.consultModel": "Talk Consult Model",
++  "talk.consultBootstrapContextMode": "Talk Consult Bootstrap Context Mode",
++  "talk.consultToolsAllow": "Talk Consult Tool Allowlist",
+   messages: "Messages",
+   "messages.messagePrefix": "Inbound Message Prefix",
+   "messages.visibleReplies": "Visible Replies",
+diff --git a/src/config/talk.normalize.test.ts b/src/config/talk.normalize.test.ts
+index ad13f14b81..2b4b8e6b18 100644
+--- a/src/config/talk.normalize.test.ts
++++ b/src/config/talk.normalize.test.ts
+@@ -13,6 +13,9 @@ describe("talk normalization", () => {
+       apiKey: "secret-key", // pragma: allowlist secret
+       consultThinkingLevel: " low ",
+       consultFastMode: true,
++      consultModel: " anvil/chat-fast ",
++      consultBootstrapContextMode: " lightweight ",
++      consultToolsAllow: [" read ", "exec", "read", "", "memory_search"],
+       speechLocale: " ru-RU ",
+       interruptOnSpeech: false,
+       silenceTimeoutMs: 1500,
+@@ -22,6 +25,9 @@ describe("talk normalization", () => {
+       speechLocale: "ru-RU",
+       consultThinkingLevel: "low",
+       consultFastMode: true,
++      consultModel: "anvil/chat-fast",
++      consultBootstrapContextMode: "lightweight",
++      consultToolsAllow: ["read", "exec", "memory_search"],
+       interruptOnSpeech: false,
+       silenceTimeoutMs: 1500,
+     });
+@@ -137,6 +143,9 @@ describe("talk normalization", () => {
+       },
+       speechLocale: "ru-RU",
+       interruptOnSpeech: true,
++      consultModel: "anvil/chat-fast",
++      consultBootstrapContextMode: "lightweight",
++      consultToolsAllow: ["read", "exec"],
+     });
+ 
+     expect(payload).toEqual({
+@@ -156,9 +165,20 @@ describe("talk normalization", () => {
+       },
+       speechLocale: "ru-RU",
+       interruptOnSpeech: true,
++      consultModel: "anvil/chat-fast",
++      consultBootstrapContextMode: "lightweight",
++      consultToolsAllow: ["read", "exec"],
+     });
+   });
+ 
++  it("drops invalid Talk consult bootstrap context modes", () => {
++    const normalized = normalizeTalkSection({
++      consultBootstrapContextMode: "compact",
++    } as never);
++
++    expect(normalized).toBeUndefined();
++  });
++
+   it("preserves normalized realtime instructions in talk.config payloads", () => {
+     const payload = buildTalkConfigResponse({
+       realtime: {
+diff --git a/src/config/talk.ts b/src/config/talk.ts
+index be47dd58fd..a362237691 100644
+--- a/src/config/talk.ts
++++ b/src/config/talk.ts
+@@ -7,6 +7,7 @@ import { normalizeThinkLevel } from "../auto-reply/thinking.js";
+ import { isRecord } from "../utils.js";
+ import type {
+   ResolvedTalkConfig,
++  TalkConsultBootstrapContextMode,
+   TalkConfig,
+   TalkConfigResponse,
+   TalkProviderConfig,
+@@ -51,6 +52,30 @@ function normalizeNonNegativeInteger(value: unknown): number | undefined {
+   return value;
+ }
+ 
++function normalizeStringList(value: unknown): string[] | undefined {
++  if (!Array.isArray(value)) {
++    return undefined;
++  }
++  const seen = new Set<string>();
++  const normalized: string[] = [];
++  for (const entry of value) {
++    const text = normalizeOptionalString(entry);
++    if (!text || seen.has(text)) {
++      continue;
++    }
++    seen.add(text);
++    normalized.push(text);
++  }
++  return normalized.length > 0 ? normalized : undefined;
++}
++
++function normalizeTalkConsultBootstrapContextMode(
++  value: unknown,
++): TalkConsultBootstrapContextMode | undefined {
++  const text = normalizeOptionalString(value);
++  return text === "full" || text === "lightweight" ? text : undefined;
++}
++
+ function buildLegacyTalkProviderCompat(
+   value: Record<string, unknown>,
+ ): TalkProviderConfig | undefined {
+@@ -235,6 +260,20 @@ export function normalizeTalkSection(value: TalkConfig | undefined): TalkConfig
+   if (typeof consultFastMode === "boolean") {
+     normalized.consultFastMode = consultFastMode;
+   }
++  const consultModel = normalizeOptionalString(source.consultModel);
++  if (consultModel) {
++    normalized.consultModel = consultModel;
++  }
++  const consultBootstrapContextMode = normalizeTalkConsultBootstrapContextMode(
++    source.consultBootstrapContextMode,
++  );
++  if (consultBootstrapContextMode) {
++    normalized.consultBootstrapContextMode = consultBootstrapContextMode;
++  }
++  const consultToolsAllow = normalizeStringList(source.consultToolsAllow);
++  if (consultToolsAllow) {
++    normalized.consultToolsAllow = consultToolsAllow;
++  }
+   const silenceTimeoutMs = normalizeSilenceTimeoutMs(source.silenceTimeoutMs);
+   if (silenceTimeoutMs !== undefined) {
+     normalized.silenceTimeoutMs = silenceTimeoutMs;
+@@ -318,6 +357,15 @@ export function buildTalkConfigResponse(value: unknown): TalkConfigResponse | un
+   if (typeof normalized?.consultFastMode === "boolean") {
+     payload.consultFastMode = normalized.consultFastMode;
+   }
++  if (typeof normalized?.consultModel === "string") {
++    payload.consultModel = normalized.consultModel;
++  }
++  if (typeof normalized?.consultBootstrapContextMode === "string") {
++    payload.consultBootstrapContextMode = normalized.consultBootstrapContextMode;
++  }
++  if (normalized?.consultToolsAllow?.length) {
++    payload.consultToolsAllow = normalized.consultToolsAllow;
++  }
+   if (typeof normalized?.speechLocale === "string") {
+     payload.speechLocale = normalized.speechLocale;
+   }
+diff --git a/src/config/types.gateway.ts b/src/config/types.gateway.ts
+index 1c7cc787c9..2c547fa64a 100644
+--- a/src/config/types.gateway.ts
++++ b/src/config/types.gateway.ts
+@@ -91,6 +91,8 @@ export type ResolvedTalkConfig = {
+   config: TalkProviderConfig;
+ };
+ 
++export type TalkConsultBootstrapContextMode = "full" | "lightweight";
++
+ export type TalkConfig = {
+   /** Active Talk TTS provider (for example "acme-speech"). */
+   provider?: string;
+@@ -111,6 +113,12 @@ export type TalkConfig = {
+     | "ultra";
+   /** Optional fast mode override for the agent run behind Talk realtime consults. */
+   consultFastMode?: boolean;
++  /** Optional one-shot model override for the agent run behind Talk realtime consults. */
++  consultModel?: string;
++  /** Optional bootstrap context mode for the agent run behind Talk realtime consults. */
++  consultBootstrapContextMode?: TalkConsultBootstrapContextMode;
++  /** Optional runtime tool allowlist for the agent run behind Talk realtime consults. */
++  consultToolsAllow?: string[];
+   /** BCP 47 locale id used for Talk speech recognition on device nodes. */
+   speechLocale?: string;
+   /** Stop speaking when user starts talking (default: true). */
+diff --git a/src/config/zod-schema.talk.test.ts b/src/config/zod-schema.talk.test.ts
+index 7dc7ad3256..cb9d34428d 100644
+--- a/src/config/zod-schema.talk.test.ts
++++ b/src/config/zod-schema.talk.test.ts
+@@ -8,6 +8,9 @@ describe("OpenClawSchema talk validation", () => {
+       talk: {
+         consultThinkingLevel: "low",
+         consultFastMode: true,
++        consultModel: "anvil/chat-fast",
++        consultBootstrapContextMode: "lightweight",
++        consultToolsAllow: ["read", "exec"],
+         silenceTimeoutMs: 1500,
+       },
+     });
+@@ -25,6 +28,36 @@ describe("OpenClawSchema talk validation", () => {
+     ).toThrow(/consultThinkingLevel/i);
+   });
+ 
++  it("rejects empty talk.consultToolsAllow entries", () => {
++    expect(() =>
++      OpenClawSchema.parse({
++        talk: {
++          consultToolsAllow: ["read", ""],
++        },
++      }),
++    ).toThrow(/consultToolsAllow/i);
++  });
++
++  it("rejects invalid talk.consultBootstrapContextMode", () => {
++    expect(() =>
++      OpenClawSchema.parse({
++        talk: {
++          consultBootstrapContextMode: "compact",
++        },
++      }),
++    ).toThrow(/consultBootstrapContextMode/i);
++  });
++
++  it("rejects empty talk.consultModel", () => {
++    expect(() =>
++      OpenClawSchema.parse({
++        talk: {
++          consultModel: "",
++        },
++      }),
++    ).toThrow(/consultModel/i);
++  });
++
+   it("accepts additional realtime Talk instructions", () => {
+     expect(() =>
+       OpenClawSchema.parse({
+diff --git a/src/config/zod-schema.ts b/src/config/zod-schema.ts
+index 23335b27eb..4d610de43b 100644
+--- a/src/config/zod-schema.ts
++++ b/src/config/zod-schema.ts
+@@ -356,6 +356,9 @@ const TalkSchema = z
+       .enum(["off", "minimal", "low", "medium", "high", "xhigh", "adaptive", "max", "ultra"])
+       .optional(),
+     consultFastMode: z.boolean().optional(),
++    consultModel: z.string().trim().min(1).optional(),
++    consultBootstrapContextMode: z.enum(["full", "lightweight"]).optional(),
++    consultToolsAllow: z.array(z.string().trim().min(1)).min(1).optional(),
+     speechLocale: z.string().optional(),
+     interruptOnSpeech: z.boolean().optional(),
+     silenceTimeoutMs: z.number().int().positive().optional(),
+diff --git a/src/gateway/server-methods/chat.ts b/src/gateway/server-methods/chat.ts
+index e2e30ec58b..2cc00c4a02 100644
+--- a/src/gateway/server-methods/chat.ts
++++ b/src/gateway/server-methods/chat.ts
+@@ -3853,7 +3853,26 @@ export const chatHandlers: GatewayRequestHandlers = {
+       runIds: res.aborted ? [runId] : [],
+     });
+   },
+-  "chat.send": async ({ params, respond, context, client }) => {
++  "chat.send": async (handlerOptions) => {
++    const { params, respond, context, client } = handlerOptions;
++    const internalOptions = (
++      handlerOptions as {
++        internal?: {
++          toolsAllow?: string[];
++          runtimeModelOverride?: string;
++          bootstrapContextMode?: "full" | "lightweight";
++        };
++      }
++    ).internal;
++    const internalToolsAllow = internalOptions?.toolsAllow;
++    const internalRuntimeModelOverride = normalizeOptionalText(
++      internalOptions?.runtimeModelOverride,
++    );
++    const internalBootstrapContextMode =
++      internalOptions?.bootstrapContextMode === "full" ||
++      internalOptions?.bootstrapContextMode === "lightweight"
++        ? internalOptions.bootstrapContextMode
++        : undefined;
+     const chatSendReceivedAtMs = performance.now();
+     const clientInfo = client?.connect?.client;
+     const supportsTaskSuggestions =
+@@ -4982,6 +5001,7 @@ export const chatHandlers: GatewayRequestHandlers = {
+               const dispatchResult = await dispatchInboundMessage({
+                 ctx,
+                 cfg,
++                toolsAllow: internalToolsAllow,
+                 dispatcher,
+                 onSessionMetadataChanges: (changes) => {
+                   for (const change of changes) {
+@@ -5000,6 +5020,10 @@ export const chatHandlers: GatewayRequestHandlers = {
+                         }),
+                       }
+                     : {}),
++                  runtimeModelOverride: internalRuntimeModelOverride,
++                  ...(internalBootstrapContextMode
++                    ? { bootstrapContextMode: internalBootstrapContextMode }
++                    : {}),
+                   ...(supportsTaskSuggestions
+                     ? { taskSuggestionDeliveryMode: "gateway" as const }
+                     : {}),
+diff --git a/src/gateway/server-methods/talk-shared.ts b/src/gateway/server-methods/talk-shared.ts
+index e4c54ebd0c..a2c15f8f6a 100644
+--- a/src/gateway/server-methods/talk-shared.ts
++++ b/src/gateway/server-methods/talk-shared.ts
+@@ -8,6 +8,7 @@ import {
+ } from "@openclaw/normalization-core/string-coerce";
+ import { ErrorCodes } from "../../../packages/gateway-protocol/src/index.js";
+ import {
++  findVoiceModelProvider,
+   getVoiceProviderConfig,
+   providerMatchesId,
+   resolveSupportedVoiceModelRefs,
+@@ -214,13 +215,18 @@ export function buildTalkRealtimeConfig(config: OpenClawConfig, requestedProvide
+     ...voiceCallRealtime.providers,
+     ...talkRealtimeProviderConfigs,
+   };
++  const realtimeProviders = listRealtimeVoiceProviders(config);
+   const voiceModelDefault = resolveConfiguredVoiceModelDefaultRef({
+     config,
+     provider: selectedProvider,
+     providerConfigs,
+-    providers: listRealtimeVoiceProviders(config),
++    providers: realtimeProviders,
+   });
+   const provider = selectedProvider ?? voiceModelDefault?.provider;
++  const providerMetadata = findVoiceModelProvider({
++    providers: realtimeProviders,
++    providerId: provider,
++  });
+   const model = normalizeOptionalString(talkRealtime?.model) ?? voiceModelDefault?.model;
+   return {
+     provider,
+@@ -249,7 +255,9 @@ export function buildTalkRealtimeConfig(config: OpenClawConfig, requestedProvide
+         : undefined,
+     reasoningEffort: normalizeOptionalString(talkRealtime?.reasoningEffort),
+     brain: normalizeOptionalLowercaseString(talkRealtime?.brain),
+-    consultRouting: normalizeOptionalLowercaseString(talkRealtime?.consultRouting),
++    consultRouting:
++      normalizeOptionalLowercaseString(talkRealtime?.consultRouting) ??
++      providerMetadata?.capabilities?.defaultConsultRouting,
+   };
+ }
+ 
+diff --git a/src/gateway/server-methods/talk.test.ts b/src/gateway/server-methods/talk.test.ts
+index 67d4677b8f..d2736409f6 100644
+--- a/src/gateway/server-methods/talk.test.ts
++++ b/src/gateway/server-methods/talk.test.ts
+@@ -376,6 +376,65 @@ describe("talk.catalog handler", () => {
+     expect(responsePayload).not.toContain("live-key");
+   });
+ 
++  it("advertises agent-consult for gateway realtime providers without native tool calls", async () => {
++    mocks.listRealtimeVoiceProviders.mockReturnValue([
++      {
++        id: "anvil",
++        label: "Anvil Voice",
++        resolveConfig: vi.fn(({ rawConfig }) => rawConfig),
++        isConfigured: vi.fn(() => true),
++        capabilities: {
++          transports: ["gateway-relay"],
++          inputAudioFormats: [{ encoding: "g711_ulaw", sampleRateHz: 8000, channels: 1 }],
++          outputAudioFormats: [{ encoding: "g711_ulaw", sampleRateHz: 8000, channels: 1 }],
++          supportsBrowserSession: false,
++          supportsToolCalls: false,
++          defaultConsultRouting: "force-agent-consult",
++        },
++        createBridge: vi.fn(),
++      } as never,
++    ]);
++    mocks.resolveConfiguredRealtimeVoiceProvider.mockReturnValue({
++      provider: { id: "anvil" },
++      providerConfig: { realtimeUrl: "ws://127.0.0.1:8765/v1/realtime" },
++    } as never);
++    const respond = vi.fn();
++
++    await talkHandlers["talk.catalog"]({
++      req: { type: "req", id: "1", method: "talk.catalog" },
++      params: {},
++      client: { connect: { scopes: ["operator.read"] } } as never,
++      isWebchatConnect: () => false,
++      respond: respond as never,
++      context: {
++        getRuntimeConfig: () =>
++          ({
++            talk: {
++              realtime: {
++                provider: "anvil",
++                providers: {
++                  anvil: { realtimeUrl: "ws://127.0.0.1:8765/v1/realtime" },
++                },
++              },
++            },
++          }) as OpenClawConfig,
++      } as never,
++    });
++
++    const payload = expectRespondOk(respond);
++    const provider = (
++      payload as {
++        realtime: { providers: Array<Record<string, unknown>> };
++      }
++    ).realtime.providers[0];
++    expect(provider).toMatchObject({
++      id: "anvil",
++      brains: ["agent-consult"],
++      supportsToolCalls: false,
++      defaultConsultRouting: "force-agent-consult",
++    });
++  });
++
+   it("reports the runtime-selected automatic providers instead of registry row order", async () => {
+     const transcriptionSlow = {
+       id: "transcription-slow",
+@@ -2312,7 +2371,7 @@ describe("talk.client.toolCall handler", () => {
+     finishRun?.();
+   });
+ 
+-  it("passes configured consult thinking and fast-mode overrides to chat.send", async () => {
++  it("passes configured consult runtime overrides to chat.send", async () => {
+     const respond = vi.fn();
+ 
+     await talkHandlers["talk.client.toolCall"]({
+@@ -2332,16 +2391,57 @@ describe("talk.client.toolCall handler", () => {
+             talk: {
+               consultThinkingLevel: "low",
+               consultFastMode: true,
++              consultModel: "anvil/chat-fast",
++              consultBootstrapContextMode: "full",
++              consultToolsAllow: ["read", "exec", "memory_search"],
+             },
+           }) as OpenClawConfig,
+       } as never,
+     });
+ 
+-    const chatInput = mockCallArg(mocks.chatSend) as { params?: Record<string, unknown> };
++    const chatInput = mockCallArg(mocks.chatSend) as {
++      params?: Record<string, unknown>;
++      internal?: Record<string, unknown>;
++    };
+     expectRecordFields(chatInput.params, {
+       thinking: "low",
+       fastMode: true,
+     });
++    expect(chatInput.params).not.toHaveProperty("toolsAllow");
++    expect(chatInput.params).not.toHaveProperty("runtimeModelOverride");
++    expectRecordFields(chatInput.internal, {
++      toolsAllow: ["read", "exec", "memory_search"],
++      runtimeModelOverride: "anvil/chat-fast",
++      bootstrapContextMode: "full",
++    });
++    expectRespondOk(respond, { runId: "run-voice-1" });
++  });
++
++  it("uses lightweight bootstrap context by default for Talk consult runs", async () => {
++    const respond = vi.fn();
++
++    await talkHandlers["talk.client.toolCall"]({
++      req: { type: "req", id: "1", method: "talk.client.toolCall" },
++      params: {
++        sessionKey: "main",
++        callId: "call-1",
++        name: "openclaw_agent_consult",
++        args: { question: "What changed?" },
++      },
++      client: { connId: "conn-1" } as never,
++      isWebchatConnect: () => false,
++      respond: respond as never,
++      context: {
++        getRuntimeConfig: () => ({}) as OpenClawConfig,
++      } as never,
++    });
++
++    const chatInput = mockCallArg(mocks.chatSend) as {
++      internal?: Record<string, unknown>;
++    };
++    expectRecordFields(chatInput.internal, {
++      bootstrapContextMode: "lightweight",
++    });
+     expectRespondOk(respond, { runId: "run-voice-1" });
+   });
+ 
+@@ -2555,6 +2655,24 @@ describe("talk.client.create handler", () => {
+     vi.clearAllMocks();
+   });
+ 
++  function mockAnvilRealtimeProviderWithConsultDefault(): void {
++    const provider = {
++      id: "anvil",
++      label: "Anvil Voice",
++      aliases: ["anvil-voice"],
++      defaultModel: "fast-local",
++      capabilities: {
++        transports: ["gateway-relay"],
++        inputAudioFormats: [],
++        outputAudioFormats: [],
++        defaultConsultRouting: "force-agent-consult",
++      },
++      isConfigured: () => true,
++      createBridge: vi.fn(),
++    };
++    mocks.listRealtimeVoiceProviders.mockReturnValue([provider] as never);
++  }
++
+   it("builds realtime launch defaults from talk.realtime", () => {
+     expect(
+       buildTalkRealtimeConfig({
+@@ -2575,6 +2693,61 @@ describe("talk.client.create handler", () => {
+     });
+   });
+ 
++  it("uses provider default realtime consult routing when config omits it", () => {
++    mockAnvilRealtimeProviderWithConsultDefault();
++
++    expect(
++      buildTalkRealtimeConfig({
++        talk: {
++          realtime: {
++            provider: "anvil",
++          },
++        },
++      }),
++    ).toMatchObject({
++      provider: "anvil",
++      consultRouting: "force-agent-consult",
++    });
++  });
++
++  it("uses provider default realtime consult routing when voice model selects the provider", () => {
++    mockAnvilRealtimeProviderWithConsultDefault();
++
++    expect(
++      buildTalkRealtimeConfig({
++        agents: {
++          defaults: {
++            voiceModel: {
++              primary: "anvil-voice/fast-local",
++            },
++          },
++        },
++      }),
++    ).toMatchObject({
++      provider: "anvil",
++      model: "fast-local",
++      consultRouting: "force-agent-consult",
++    });
++  });
++
++  it("preserves explicit realtime consult routing over provider defaults", () => {
++    mockAnvilRealtimeProviderWithConsultDefault();
++
++    expect(
++      buildTalkRealtimeConfig({
++        talk: {
++          realtime: {
++            provider: "anvil",
++            consultRouting: "provider-direct",
++          },
++        },
++      }),
++    ).toMatchObject({
++      provider: "anvil",
++      consultRouting: "provider-direct",
++    });
++  });
++
+   it("uses talk.realtime provider, model, voice, and instructions without reading speech provider config", async () => {
+     const createBrowserSession = vi.fn(async (_input: unknown) => ({
+       provider: "openai",
+diff --git a/src/gateway/server-methods/talk.ts b/src/gateway/server-methods/talk.ts
+index 477775f360..9a7380a733 100644
+--- a/src/gateway/server-methods/talk.ts
++++ b/src/gateway/server-methods/talk.ts
+@@ -350,7 +350,7 @@ function buildTalkCatalog(config: OpenClawConfig) {
+             provider.isConfigured({ cfg: config, providerConfig }),
+           ),
+           modes: ["realtime"],
+-          brains: capabilities?.supportsToolCalls === false ? ["none"] : ["agent-consult"],
++          brains: ["agent-consult"],
+           supportsBrowserSession: Boolean(
+             capabilities?.supportsBrowserSession ?? provider.createBrowserSession,
+           ),
+@@ -384,6 +384,9 @@ function buildTalkCatalog(config: OpenClawConfig) {
+         if (capabilities?.supportsSessionResumption !== undefined) {
+           entry.supportsSessionResumption = capabilities.supportsSessionResumption;
+         }
++        if (capabilities?.defaultConsultRouting !== undefined) {
++          entry.defaultConsultRouting = capabilities.defaultConsultRouting;
++        }
+         return entry;
+       }),
+     },
+diff --git a/src/gateway/talk-agent-consult.ts b/src/gateway/talk-agent-consult.ts
+index 7f2a0bd800..b7740303fa 100644
+--- a/src/gateway/talk-agent-consult.ts
++++ b/src/gateway/talk-agent-consult.ts
+@@ -20,6 +20,31 @@ import { registerTalkRealtimeRelayAgentRun } from "./talk-realtime-relay.js";
+ import { formatForLog } from "./ws-log.js";
+ 
+ type TalkChatSendAckStatus = "started" | "in_flight" | "ok" | "timeout" | "error";
++type TalkConsultBootstrapContextMode = "full" | "lightweight";
++
++const DEFAULT_TALK_CONSULT_BOOTSTRAP_CONTEXT_MODE: TalkConsultBootstrapContextMode = "lightweight";
++
++type TalkConsultInternalOptions = {
++  toolsAllow?: string[];
++  runtimeModelOverride?: string;
++  bootstrapContextMode: TalkConsultBootstrapContextMode;
++};
++
++function buildTalkConsultInternalOptions(
++  normalizedTalk: ReturnType<typeof normalizeTalkSection>,
++): TalkConsultInternalOptions {
++  const internal: TalkConsultInternalOptions = {
++    bootstrapContextMode:
++      normalizedTalk?.consultBootstrapContextMode ?? DEFAULT_TALK_CONSULT_BOOTSTRAP_CONTEXT_MODE,
++  };
++  if (normalizedTalk?.consultToolsAllow?.length) {
++    internal.toolsAllow = normalizedTalk.consultToolsAllow;
++  }
++  if (normalizedTalk?.consultModel) {
++    internal.runtimeModelOverride = normalizedTalk.consultModel;
++  }
++  return internal;
++}
+ 
+ function normalizeTalkChatSendAckStatus(result: unknown): TalkChatSendAckStatus {
+   if (!result || typeof result !== "object" || Array.isArray(result)) {
+@@ -104,6 +129,7 @@ export async function startTalkRealtimeAgentConsult(params: {
+           ? { fastMode: normalizedTalk.consultFastMode }
+           : {}),
+       },
++      internal: buildTalkConsultInternalOptions(normalizedTalk),
+       respond: (ok: boolean, result?: unknown, error?: ErrorShape) => {
+         acknowledged = true;
+         resolve(
+diff --git a/src/talk/agent-consult-tool.test.ts b/src/talk/agent-consult-tool.test.ts
+index 1144059f6e..579dbfbacd 100644
+--- a/src/talk/agent-consult-tool.test.ts
++++ b/src/talk/agent-consult-tool.test.ts
+@@ -14,14 +14,14 @@ import {
+ import type { RealtimeVoiceTool } from "./provider-types.js";
+ 
+ describe("realtime voice agent consult tool", () => {
+-  it("normalizes shared tool arguments for browser chat forwarding", () => {
++  it("keeps browser chat forwarding to the visible user request", () => {
+     expect(
+       buildRealtimeVoiceAgentConsultChatMessage({
+         question: "  What changed? ",
+         context: "  PR #123 ",
+         responseStyle: " concise ",
+       }),
+-    ).toBe("What changed?\n\nContext:\nPR #123\n\nSpoken style:\nconcise");
++    ).toBe("What changed?");
+   });
+ 
+   it("requires a non-empty question", () => {
+@@ -47,7 +47,11 @@ describe("realtime voice agent consult tool", () => {
+ 
+   it("builds a delegated voice request prompt with recent transcript", () => {
+     const prompt = buildRealtimeVoiceAgentConsultPrompt({
+-      args: { question: "Do we support realtime tools?" },
++      args: {
++        question: "Do we support realtime tools?",
++        context: "Realtime provider forced consult after transcript finalization.",
++        responseStyle: "Reply in a concise spoken tone.",
++      },
+       transcript: [
+         { role: "user", text: "Can you check the repo?" },
+         { role: "assistant", text: "I'll verify." },
+@@ -64,7 +68,9 @@ describe("realtime voice agent consult tool", () => {
+         "Act as the configured OpenClaw agent on behalf of this user. Use available tools when the request asks you to do work.",
+         "When finished, return only the concise result the realtime voice agent should speak back.",
+         "Do not include markdown, tool logs, or private reasoning. Include citations only when the spoken answer needs them.",
++        "Spoken style: Reply in a concise spoken tone.",
+         "Recent voice transcript for context:\nParticipant: Can you check the repo?\nAgent: I'll verify.",
++        "Additional realtime context:\nRealtime provider forced consult after transcript finalization.",
+         "User request:\nDo we support realtime tools?",
+       ].join("\n\n"),
+     );
+diff --git a/src/talk/agent-consult-tool.ts b/src/talk/agent-consult-tool.ts
+index 14ed3fa417..ead105c4b7 100644
+--- a/src/talk/agent-consult-tool.ts
++++ b/src/talk/agent-consult-tool.ts
+@@ -184,16 +184,9 @@ export function parseRealtimeVoiceAgentConsultArgs(args: unknown): RealtimeVoice
+   };
+ }
+ 
+-/** Build the plain chat message used by browser/chat forwarding paths. */
++/** Build the visible chat message used by browser/chat forwarding paths. */
+ export function buildRealtimeVoiceAgentConsultChatMessage(args: unknown): string {
+-  const parsed = parseRealtimeVoiceAgentConsultArgs(args);
+-  return [
+-    parsed.question,
+-    parsed.context ? `Context:\n${parsed.context}` : undefined,
+-    parsed.responseStyle ? `Spoken style:\n${parsed.responseStyle}` : undefined,
+-  ]
+-    .filter(Boolean)
+-    .join("\n\n");
++  return parseRealtimeVoiceAgentConsultArgs(args).question;
+ }
+ 
+ /** Build the delegated OpenClaw agent prompt for a live voice consult. */
