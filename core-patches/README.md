@@ -1,9 +1,15 @@
-# Core patches for vanilla OpenClaw
+# Optional core patches for older OpenClaw builds
 
-These patches carry the fakoli customizations that cannot live in the
-Speech to Speech plugin because they modify OpenClaw core. Applied to a
-vanilla `openclaw/openclaw` checkout at the pinned ref, they reproduce what
-the `fakoli/openclaw` fork used to provide — without carrying the fork.
+These legacy overlays carry fakoli customizations that cannot live in the
+Speech to Speech plugin because they modify OpenClaw core. Applied to the
+pinned historical `openclaw/openclaw` ref, they reproduce what the
+`fakoli/openclaw` fork used to provide without carrying the fork.
+
+The published plugin does **not** require these patches on stock OpenClaw
+`>=2026.6.11`; that release exposes the realtime voice provider and Gateway
+relay contracts through the public plugin SDK. Keep these overlays only when
+reproducing the older pinned deployment or when the extra consult behavior is
+explicitly required.
 
 ## Contents
 
@@ -11,7 +17,7 @@ the `fakoli/openclaw` fork used to provide — without carrying the fork.
   (the fork's last upstream sync point).
 - `01-realtime-relay-hooks.patch` — gateway-protocol channel schema additions,
   talk realtime relay tool-call support, voice-call webhook handler hook.
-  **The Speech to Speech plugin depends on this patch.**
+  The equivalent provider/relay contract ships in stock OpenClaw `>=2026.6.11`.
 - `02-talk-consult-fixes.patch` — talk/consult behavior fixes: consult routing
   (chat-fast), forced-consult loop and transcript-pollution guards, consult
   tool narrowing, lightweight voice-consult bootstrap, model-selection lock,
