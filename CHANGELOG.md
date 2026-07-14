@@ -4,11 +4,24 @@ All notable changes to this project are documented here.
 
 ## Unreleased
 
+## 0.2.0 - 2026-07-14
+
+- Present the Realtime provider as Anvil Serving Realtime, make
+  `anvil-serving` canonical, and retain `anvil` as a compatibility alias.
+- Rework the product README, add configuration and troubleshooting guides, and
+  credit Hugging Face Speech-to-Speech as architectural inspiration.
+- Add benchmark-backed STT/TTS starting points, complete cascade examples, and
+  explicit endpoint-compatibility caveats.
+- Add contribution guidance, structured issue and pull-request templates,
+  dependency automation, and an installed-package runtime smoke test.
 - Preserve bounded multi-turn context in the standalone OpenAI-compatible cascade.
 - Reject oversized audio before decoding or resampling and reject request deadlines
   that exceed Node.js timer limits.
 - Make the working GitHub release artifact the primary installation path and include
   the security policy in packaged releases.
+- Bound pre-ready audio and text queues, reject post-close work, validate PCM and
+  TTS media types more strictly, and commit conversation history only after audio
+  synthesis succeeds.
 
 ## 0.1.0 - 2026-07-14
 

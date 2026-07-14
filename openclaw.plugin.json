@@ -8,7 +8,7 @@
   "enabledByDefault": false,
   "contracts": {
     "realtimeVoiceProviders": [
-      "anvil",
+      "anvil-serving",
       "openai-cascade"
     ]
   },
@@ -48,13 +48,17 @@
         "type": "string"
       },
       "vadThreshold": {
-        "type": "number"
+        "type": "number",
+        "minimum": 0,
+        "maximum": 1
       },
       "silenceDurationMs": {
-        "type": "number"
+        "type": "integer",
+        "minimum": 0
       },
       "prefixPaddingMs": {
-        "type": "number"
+        "type": "integer",
+        "minimum": 0
       },
       "sttBaseUrl": {
         "type": "string",
@@ -90,7 +94,9 @@
         "type": "string"
       },
       "ttsSampleRateHz": {
-        "type": "number",
+        "type": "integer",
+        "minimum": 8000,
+        "maximum": 384000,
         "description": "TTS PCM response sample rate; defaults to 24000."
       },
       "requestTimeoutMs": {

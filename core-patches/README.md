@@ -22,13 +22,15 @@ explicitly required.
   (chat-fast), forced-consult loop and transcript-pollution guards, consult
   tool narrowing, lightweight voice-consult bootstrap, model-selection lock,
   plus the config schema (zod) entries for all of the above.
+- `install-legacy-openclaw.sh` — rebuild helper for this pinned historical
+  deployment only.
 
 ## Install
 
-    ./install-vanilla.sh
+    ./core-patches/install-legacy-openclaw.sh
 
 Clones/updates vanilla OpenClaw at `UPSTREAM_PIN` into
-`~/.openclaw/workspace/openclaw-vanilla`, applies the patches, builds with
+`~/.openclaw/workspace/openclaw-legacy`, applies the patches, builds with
 pnpm, and repoints the `/opt/homebrew/lib/node_modules/openclaw` symlink.
 Restart the gateway afterwards.
 
@@ -37,7 +39,7 @@ Restart the gateway afterwards.
 The fork bundled the plugin as `extensions/anvil-voice` (id `anvil-voice`).
 On vanilla, load this repo as an external plugin instead:
 
-1. Build this repo (`pnpm install && pnpm build`).
+1. Build this repo (`npm ci && npm run build`).
 2. In `~/.openclaw/openclaw.json`: add this repo's path to the plugin load
    paths, and rename the `anvil-voice` plugin config key to
    `speech-to-speech` (the plugin id changed at extraction).
@@ -49,7 +51,7 @@ On vanilla, load this repo as an external plugin instead:
    `git apply --3way --check core-patches/*.patch`
 3. If a patch conflicts, apply what you can, fix by hand, and regenerate that
    patch with `git diff <new-pin> HEAD -- <that patch's pathspecs>`.
-4. Rerun `./install-vanilla.sh`.
+4. Rerun `./core-patches/install-legacy-openclaw.sh`.
 
 Regenerating from the fork (while it still exists):
 

@@ -1,0 +1,81 @@
+name: Bug report
+description: Report a reproducible problem with installation, configuration, or realtime voice behavior.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. Remove credentials, private transcripts, and audio before submitting.
+        Security vulnerabilities belong in a private GitHub Security Advisory.
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Provider
+      options:
+        - Anvil Serving Realtime (anvil-serving / anvil)
+        - OpenAI-Compatible Cascade (openai-cascade)
+        - Installation or provider selection
+    validations:
+      required: true
+  - type: input
+    id: plugin_version
+    attributes:
+      label: Plugin version or commit
+      placeholder: v0.2.0 or commit SHA
+    validations:
+      required: true
+  - type: input
+    id: openclaw_version
+    attributes:
+      label: OpenClaw version
+      placeholder: 2026.6.11
+    validations:
+      required: true
+  - type: input
+    id: node_version
+    attributes:
+      label: Node.js version
+      placeholder: Output of node --version
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Operating system and topology
+      placeholder: Ubuntu 24.04; Gateway local; STT/TTS on a private GPU host
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Include the expected behavior and the actual behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      placeholder: |
+        1. Install ...
+        2. Configure ...
+        3. Start Talk ...
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Redacted runtime diagnostics
+      description: Paste relevant output from `openclaw plugins inspect speech-to-speech --runtime --json` and remove secrets or private content.
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed API keys, tokens, private transcripts, and audio from this report.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true
