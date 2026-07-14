@@ -13,7 +13,7 @@ Copyright (c) 2026 OpenClaw Foundation.
 
 ## ws
 
-The Anvil Realtime provider uses [ws](https://github.com/websockets/ws) as its
+The Anvil Serving Realtime provider uses [ws](https://github.com/websockets/ws) as its
 WebSocket client under the MIT License.
 
 Copyright (c) 2011 Einar Otto Stangvik; copyright (c) 2013 Arnout Kazemier and
@@ -21,7 +21,7 @@ contributors; copyright (c) 2016 Luigi Pinca and contributors.
 
 ## Anvil Serving
 
-The Anvil provider and the standalone cascade were informed by the voice
+The Anvil Serving provider and the standalone cascade were informed by the voice
 pipeline and OpenAI-compatible endpoint conventions in
 [anvil-serving](https://github.com/fakoli/anvil-serving), distributed under the
 MIT License.

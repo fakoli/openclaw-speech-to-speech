@@ -24,8 +24,11 @@ const SAMPLE_RATE_HZ = 16_000;
 const DEFAULT_SILENCE_DURATION_MS = 200;
 const DEFAULT_TTS_SAMPLE_RATE_HZ = 24_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
+const MAX_REQUEST_TIMEOUT_MS = 2_147_483_647;
 const SILENCE_SAMPLE_ABS_THRESHOLD = 256;
 const MAX_BUFFERED_AUDIO_BYTES = 10 * 1024 * 1024;
+const MAX_CONVERSATION_TURNS = 12;
+const MAX_CONVERSATION_CHARS = 64 * 1024;
 const MAX_JSON_RESPONSE_BYTES = 1024 * 1024;
 const MAX_TTS_RESPONSE_BYTES = 25 * 1024 * 1024;
 const MAX_ERROR_RESPONSE_BYTES = 16 * 1024;
@@ -55,6 +58,11 @@ type OpenAICascadeBridgeConfig = RealtimeVoiceBridgeCreateRequest & Required<
 > &
   OpenAICascadeProviderConfig;
 
+type ConversationTurn = {
+  user: string;
+  assistant: string;
+};
+
 function resolveProviderConfigRecord(config: RealtimeVoiceProviderConfig): Record<string, unknown> {
   const providers =
     typeof config.providers === "object" && config.providers !== null && !Array.isArray(config.providers)
@@ -75,6 +83,19 @@ function asNonNegativeInteger(value: unknown): number | undefined {
 function asPositiveInteger(value: unknown): number | undefined {
   const number = asFiniteNumber(value);
   return number !== undefined && Number.isSafeInteger(number) && number > 0 ? number : undefined;
+}
+
+function normalizeRequestTimeoutMs(value: unknown): number | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  const timeoutMs = asPositiveInteger(value);
+  if (timeoutMs === undefined || timeoutMs > MAX_REQUEST_TIMEOUT_MS) {
+    throw new Error(
+      `Speech to Speech requestTimeoutMs must be an integer between 1 and ${MAX_REQUEST_TIMEOUT_MS} milliseconds`,
+    );
+  }
+  return timeoutMs;
 }
 
 function normalizeProviderConfig(config: RealtimeVoiceProviderConfig): OpenAICascadeProviderConfig {
@@ -102,7 +123,7 @@ function normalizeProviderConfig(config: RealtimeVoiceProviderConfig): OpenAICas
     ttsSampleRateHz: asPositiveInteger(raw.ttsSampleRateHz),
     voice: normalizeOptionalString(raw.speakerVoice ?? raw.voice),
     silenceDurationMs: asNonNegativeInteger(raw.silenceDurationMs),
-    requestTimeoutMs: asPositiveInteger(raw.requestTimeoutMs),
+    requestTimeoutMs: normalizeRequestTimeoutMs(raw.requestTimeoutMs),
   };
 }
 
@@ -271,6 +292,8 @@ class OpenAICascadeVoiceBridge implements RealtimeVoiceBridge {
   private consecutiveSilenceMs = 0;
   private generation = 0;
   private activeAbort: AbortController | undefined;
+  private conversationHistory: ConversationTurn[] = [];
+  private conversationHistoryChars = 0;
 
   constructor(private readonly config: OpenAICascadeBridgeConfig) {
     this.audioFormat = config.audioFormat ?? REALTIME_VOICE_AUDIO_FORMAT_G711_ULAW_8KHZ;
@@ -284,6 +307,9 @@ class OpenAICascadeVoiceBridge implements RealtimeVoiceBridge {
 
   sendAudio(audio: Buffer): void {
     if (!this.connected) {
+      return;
+    }
+    if (!this.canAcceptInputAudio(audio)) {
       return;
     }
     const pcm = this.toInputPcm(audio);
@@ -341,6 +367,7 @@ class OpenAICascadeVoiceBridge implements RealtimeVoiceBridge {
     this.activeAbort?.abort();
     this.activeAbort = undefined;
     this.clearInputBuffer();
+    this.clearConversationHistory();
     this.config.onClose?.("completed");
   }
 
@@ -351,6 +378,27 @@ class OpenAICascadeVoiceBridge implements RealtimeVoiceBridge {
   private toInputPcm(audio: Buffer): Buffer {
     const pcm = this.audioFormat.encoding === "pcm16" ? audio : mulawToPcm(audio);
     return resamplePcm(pcm, this.audioFormat.sampleRateHz, SAMPLE_RATE_HZ);
+  }
+
+  private canAcceptInputAudio(audio: Buffer): boolean {
+    const inputSamples = this.audioFormat.encoding === "pcm16" ? Math.floor(audio.length / 2) : audio.length;
+    const estimatedPcmBytes = Math.floor(
+      (inputSamples * SAMPLE_RATE_HZ) / this.audioFormat.sampleRateHz,
+    ) * 2;
+    const remainingBytes = MAX_BUFFERED_AUDIO_BYTES - this.bufferedAudioBytes;
+    if (
+      audio.length <= MAX_BUFFERED_AUDIO_BYTES &&
+      Number.isSafeInteger(estimatedPcmBytes) &&
+      estimatedPcmBytes >= 0 &&
+      estimatedPcmBytes <= remainingBytes
+    ) {
+      return true;
+    }
+    this.clearInputBuffer();
+    this.config.onError?.(
+      new Error(`Speech to Speech input audio exceeded ${MAX_BUFFERED_AUDIO_BYTES} bytes before conversion`),
+    );
+    return false;
   }
 
   private fromOutputPcm(audio: Buffer): Buffer {
@@ -383,6 +431,26 @@ class OpenAICascadeVoiceBridge implements RealtimeVoiceBridge {
     this.bufferedAudioBytes = 0;
     this.speechSeen = false;
     this.consecutiveSilenceMs = 0;
+  }
+
+  private rememberConversationTurn(user: string, assistant: string): void {
+    this.conversationHistory.push({ user, assistant });
+    this.conversationHistoryChars += user.length + assistant.length;
+    while (
+      this.conversationHistory.length > MAX_CONVERSATION_TURNS ||
+      this.conversationHistoryChars > MAX_CONVERSATION_CHARS
+    ) {
+      const removed = this.conversationHistory.shift();
+      if (!removed) {
+        break;
+      }
+      this.conversationHistoryChars -= removed.user.length + removed.assistant.length;
+    }
+  }
+
+  private clearConversationHistory(): void {
+    this.conversationHistory = [];
+    this.conversationHistoryChars = 0;
   }
 
   private commitAudioTurn(): void {
@@ -435,6 +503,7 @@ class OpenAICascadeVoiceBridge implements RealtimeVoiceBridge {
       if (!this.isCurrent(turn)) {
         return;
       }
+      this.rememberConversationTurn(text, response);
       this.config.onTranscript?.("assistant", response, true);
       responseId = `cascade-${randomUUID()}`;
       this.config.onEvent?.({ direction: "server", type: "response.created", responseId });
@@ -491,9 +560,13 @@ class OpenAICascadeVoiceBridge implements RealtimeVoiceBridge {
   }
 
   private async complete(text: string, signal?: AbortSignal): Promise<string> {
-    const messages: Array<{ role: "system" | "user"; content: string }> = [];
+    const messages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [];
     if (this.config.instructions?.trim()) {
       messages.push({ role: "system", content: this.config.instructions.trim() });
+    }
+    for (const turn of this.conversationHistory) {
+      messages.push({ role: "user", content: turn.user });
+      messages.push({ role: "assistant", content: turn.assistant });
     }
     messages.push({ role: "user", content: text });
     const request = requestSignal(signal, this.config.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);

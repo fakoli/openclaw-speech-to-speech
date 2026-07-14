@@ -5,22 +5,22 @@
 [![Node.js 22.19+](https://img.shields.io/badge/node-%3E%3D22.19-339933.svg)](https://nodejs.org/)
 
 **Bring your own voice stack to [OpenClaw](https://openclaw.ai).** Connect Talk
-to Anvil Realtime, or run speech-to-speech directly against your own
+to Anvil Serving Realtime, or run speech-to-speech directly against your own
 OpenAI-compatible STT, LLM, and TTS endpoints.
 
 | Provider | Best for | Runtime path |
 | --- | --- | --- |
-| `anvil` | Realtime streaming, Anvil routing, and OpenClaw tool continuation | Gateway -> Anvil `/v1/realtime` -> STT/LLM/TTS |
+| `anvil` | Realtime streaming, Anvil Serving routing, and OpenClaw tool continuation | Gateway -> Anvil Serving `/v1/realtime` -> STT/LLM/TTS |
 | `openai-cascade` | A standalone, provider-neutral local voice stack | Gateway -> STT -> Chat Completions -> TTS |
 
-The plugin offers two Gateway-relay providers, so an Anvil deployment is optional:
+The plugin offers two Gateway-relay providers, so an Anvil Serving deployment is optional:
 
-- `anvil` bridges OpenClaw Talk to an Anvil `/v1/realtime` WebSocket endpoint.
+- `anvil` bridges OpenClaw Talk to an Anvil Serving `/v1/realtime` WebSocket endpoint.
 - `openai-cascade` runs local silence-based turn detection -> STT -> LLM -> TTS using the
   operator's own OpenAI-compatible HTTP endpoints.
 
 In both cases audio stays server-side and browsers only ever speak authenticated
-Gateway RPCs. The Anvil provider also forwards tool calls through OpenClaw's
+Gateway RPCs. The Anvil Serving provider also forwards tool calls through OpenClaw's
 `openclaw_agent_consult` policy.
 
 Runs against stock OpenClaw `>=2026.6.11` — no fork required.
@@ -29,22 +29,25 @@ Runs against stock OpenClaw `>=2026.6.11` — no fork required.
 
 - OpenClaw `2026.6.11` or newer.
 - Node.js `22.19.0` or newer.
-- Either an Anvil Realtime WebSocket endpoint or OpenAI-compatible STT, Chat
+- Either an Anvil Serving Realtime WebSocket endpoint or OpenAI-compatible STT, Chat
   Completions, and raw-PCM TTS endpoints.
 
 ## Install
 
-```bash
-openclaw plugins install @fakoli/openclaw-speech-to-speech
-```
-
-Or install the packaged tarball from the GitHub release:
+Install the packaged tarball from the GitHub release:
 
 ```bash
 gh release download v0.1.0 \
   --repo fakoli/openclaw-speech-to-speech \
   --pattern 'fakoli-openclaw-speech-to-speech-0.1.0.tgz'
 openclaw plugins install npm-pack:./fakoli-openclaw-speech-to-speech-0.1.0.tgz
+```
+
+The npm package is not yet published. Once it is available
+from the registry, the equivalent command will be:
+
+```bash
+openclaw plugins install @fakoli/openclaw-speech-to-speech
 ```
 
 Or from a local checkout while developing:
@@ -55,7 +58,7 @@ openclaw plugins install npm-pack:/tmp/fakoli-openclaw-speech-to-speech-0.1.0.tg
 openclaw plugins inspect speech-to-speech --runtime --json
 ```
 
-## Configure Anvil Realtime
+## Configure Anvil Serving Realtime
 
 ```jsonc
 {
@@ -64,7 +67,7 @@ openclaw plugins inspect speech-to-speech --runtime --json
       "provider": "anvil",
       "transport": "gateway-relay",
       "brain": "agent-consult",
-      // Anvil skips openclaw_agent_consult for direct replies; force finalized
+      // Anvil Serving skips openclaw_agent_consult for direct replies; force finalized
       // transcripts through OpenClaw instead. (Stock OpenClaw has no
       // per-provider default, so set this explicitly.)
       "consultRouting": "force-agent-consult",
@@ -85,7 +88,7 @@ key.
 ## Configure a standalone OpenAI-compatible cascade
 
 Choose `openai-cascade` when you operate your own STT, LLM, and TTS services
-and do not want to run Anvil. The three services may be separate hosts or the
+and do not want to run Anvil Serving. The three services may be separate hosts or the
 same OpenAI-compatible server. This provider sends 16 kHz mono PCM WAV to
 `/audio/transcriptions`, sends the final transcript to `/chat/completions`,
 then requests raw PCM from `/audio/speech` and converts it from
@@ -119,21 +122,23 @@ when required; each accepts an OpenClaw secret reference. A shared `apiKey`
 or `token` remains available when all three endpoints use the same credential.
 For security, cleartext `http://` endpoints must be loopback, private, `.local`,
 or `.ts.net`; use `https://` for public hosts. The standalone cascade has no
-model-side tool-call loop, so select the Anvil provider when you need
+model-side tool-call loop, so select the Anvil Serving provider when you need
 `openclaw_agent_consult` tool continuation.
 
 The standalone path fails closed on oversized audio or response bodies,
 unexpected redirects, invalid JSON, non-PCM TTS responses, and upstream
-deadlines. Starting a new turn cancels the superseded request.
+deadlines. Raw audio is bounded before decoding or resampling, and starting a
+new turn cancels the superseded request. The cascade retains up to 12 completed
+conversation turns, bounded to 64 KiB of text, for multi-turn follow-ups.
 
 ### Provider options
 
 | Key | Default | Notes |
 | --- | --- | --- |
-| `realtimeUrl` | — | Anvil realtime WebSocket URL. |
+| `realtimeUrl` | — | Anvil Serving Realtime WebSocket URL. |
 | `baseUrl` | — | HTTP/WS base; `/v1/realtime` appended when needed. |
 | `apiKey` / `token` | — | Bearer token or SecretRef for non-loopback endpoints. |
-| `model` | `fast-local` | Anvil model id. |
+| `model` | `fast-local` | Anvil Serving model id. |
 | `voice` / `speakerVoice` | — | Speaker voice id. |
 | `vadThreshold` | — | Voice-activity detection threshold. |
 | `silenceDurationMs` | `200` | Silence window before finalizing a turn. |
@@ -151,7 +156,7 @@ deadlines. Starting a new turn cancels the superseded request.
 | `apiKey` / `token` | No | Shared bearer-token fallback for all three endpoints. |
 | `voice` / `speakerVoice` | No | TTS voice id; defaults to `alloy`. |
 | `silenceDurationMs` | `200` | Local silence window before committing an audio turn. |
-| `requestTimeoutMs` | `60000` | Per-stage STT, LLM, and TTS request deadline. |
+| `requestTimeoutMs` | `60000` | Per-stage STT, LLM, and TTS deadline; maximum `2147483647`. |
 
 ## Develop
 
@@ -174,10 +179,10 @@ behavior. It is not installed with the npm package.
 
 ## Inspiration and license
 
-The project grew out of the Anvil Voice cascade in
+The project grew out of the Anvil Serving voice cascade in
 [anvil-serving](https://github.com/fakoli/anvil-serving) and OpenClaw's
 Gateway-relay provider model. The standalone provider keeps the useful shape
-of that pipeline while removing the Anvil runtime requirement.
+of that pipeline while removing the Anvil Serving runtime requirement.
 
 Released under the [MIT License](LICENSE). See
 [third-party notices](THIRD_PARTY_NOTICES.md) for OpenClaw, `ws`, and
