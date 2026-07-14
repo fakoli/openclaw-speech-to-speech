@@ -1,7 +1,8 @@
 # Third-party notices and inspiration
 
 OpenClaw Speech to Speech is original software distributed under the MIT
-License. It interoperates with and depends on the following projects:
+License. It interoperates with, depends on, or draws architectural inspiration
+from the following projects:
 
 ## OpenClaw
 
@@ -27,6 +28,15 @@ pipeline and OpenAI-compatible endpoint conventions in
 MIT License.
 
 Copyright (c) 2026 Sekou Doumbouya.
+
+## Hugging Face Speech-to-Speech
+
+The standalone provider's modular STT → LLM → TTS cascade was inspired in part
+by [Hugging Face Speech-to-Speech](https://github.com/huggingface/speech-to-speech).
+This package does not copy or depend on its implementation. The Hugging Face
+project is distributed under the Apache License 2.0.
+
+Copyright 2024 The HuggingFace Inc. team.
 
 The complete license for this package is in [LICENSE](LICENSE). Dependency
 packages retain their own license files and notices.

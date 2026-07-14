@@ -1,4 +1,4 @@
-// Speech to Speech provider module bridges OpenClaw Talk gateway relay to Anvil /v1/realtime.
+// Anvil Serving Realtime provider for the OpenClaw Talk gateway relay.
 import { randomUUID } from "node:crypto";
 import type {
   RealtimeVoiceAudioFormat,
@@ -22,13 +22,20 @@ import { asFiniteNumber, normalizeOptionalString } from "openclaw/plugin-sdk/str
 import WebSocket from "ws";
 import type { RawData } from "ws";
 
-const ANVIL_REALTIME_PROVIDER_ID = "anvil";
-const ANVIL_REALTIME_LABEL = "Speech to Speech";
+const ANVIL_REALTIME_PROVIDER_ID = "anvil-serving";
+const ANVIL_REALTIME_PROVIDER_ALIASES = ["anvil"];
+const ANVIL_REALTIME_LABEL = "Anvil Serving Realtime";
 const ANVIL_REALTIME_DEFAULT_MODEL = "fast-local";
 const ANVIL_REALTIME_SAMPLE_RATE_HZ = 16_000;
 const ANVIL_REALTIME_DEFAULT_SILENCE_DURATION_MS = 200;
 const ANVIL_REALTIME_WS_MAX_PAYLOAD_BYTES = 16 * 1024 * 1024;
+const ANVIL_REALTIME_MAX_AUDIO_CHUNK_BYTES = 1024 * 1024;
 const ANVIL_REALTIME_MAX_PENDING_AUDIO_CHUNKS = 320;
+const ANVIL_REALTIME_MAX_PENDING_AUDIO_BYTES = 10 * 1024 * 1024;
+const ANVIL_REALTIME_MAX_USER_MESSAGE_CHARS = 64 * 1024;
+const ANVIL_REALTIME_MAX_PENDING_USER_MESSAGES = 64;
+const ANVIL_REALTIME_MAX_PENDING_USER_CHARS = 64 * 1024;
+const ANVIL_REALTIME_MAX_TOOL_RESULT_CHARS = 256 * 1024;
 const ANVIL_REALTIME_CONNECT_TIMEOUT_MS = 10_000;
 const ANVIL_REALTIME_SILENCE_SAMPLE_ABS_THRESHOLD = 256;
 const RECENT_FINAL_TRANSCRIPT_DEDUPE_MS = 2_000;
@@ -95,11 +102,11 @@ function resolveAnvilProviderConfigRecord(
     !Array.isArray(config.providers)
       ? (config.providers as Record<string, unknown>)
       : undefined;
-  const nested = providers?.anvil;
+  const nested = providers?.[ANVIL_REALTIME_PROVIDER_ID] ?? providers?.anvil;
   if (typeof nested === "object" && nested !== null && !Array.isArray(nested)) {
     return nested as Record<string, unknown>;
   }
-  const direct = config.anvil;
+  const direct = config[ANVIL_REALTIME_PROVIDER_ID] ?? config.anvil;
   if (typeof direct === "object" && direct !== null && !Array.isArray(direct)) {
     return direct as Record<string, unknown>;
   }
@@ -127,7 +134,7 @@ function normalizeProviderConfig(
     baseUrl,
     apiKey: normalizeResolvedSecretInputString({
       value: raw.apiKey ?? raw.token,
-      path: "plugins.entries.voice-call.config.realtime.providers.anvil.apiKey",
+      path: "plugins.entries.voice-call.config.realtime.providers.anvil-serving.apiKey",
     }),
     model: normalizeOptionalString(raw.model),
     voice: normalizeOptionalString(raw.speakerVoice ?? raw.voice),
@@ -156,7 +163,7 @@ function normalizeRealtimeUrl(rawUrl: string, options: { appendRealtimePath: boo
     parsed = new URL(rawUrl);
   } catch (error) {
     throw new Error(
-      `Speech to Speech realtime URL is invalid: ${error instanceof Error ? error.message : String(error)}`,
+      `Anvil Serving Realtime URL is invalid: ${error instanceof Error ? error.message : String(error)}`,
       { cause: error },
     );
   }
@@ -166,18 +173,18 @@ function normalizeRealtimeUrl(rawUrl: string, options: { appendRealtimePath: boo
   } else if (parsed.protocol === "https:") {
     parsed.protocol = "wss:";
   } else if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") {
-    throw new Error("Speech to Speech realtime URL must use ws://, wss://, http://, or https://");
+    throw new Error("Anvil Serving Realtime URL must use ws://, wss://, http://, or https://");
   }
   if (parsed.username || parsed.password || parsed.search || parsed.hash) {
     throw new Error(
-      "Speech to Speech realtime URL must not include credentials, query strings, or fragments",
+      "Anvil Serving Realtime URL must not include credentials, query strings, or fragments",
     );
   }
 
   const hostname = parsed.hostname.toLowerCase().replace(/\.+$/u, "");
   if (hostname === LOOPBACK_HOSTNAME_ALIAS) {
     throw new Error(
-      "Speech to Speech realtime URL must use 127.0.0.1 instead of a loopback hostname alias",
+      "Anvil Serving Realtime URL must use 127.0.0.1 instead of a loopback hostname alias",
     );
   }
   if (parsed.protocol === "ws:" && !isTrustedPlaintextHost(parsed.hostname)) {
@@ -266,7 +273,11 @@ class AnvilRealtimeVoiceBridge implements RealtimeVoiceBridge {
   private ready = false;
   private intentionallyClosed = false;
   private pendingAudio: Buffer[] = [];
+  private pendingAudioBytes = 0;
+  private pendingAudioRejected = false;
   private pendingUserMessages: string[] = [];
+  private pendingUserMessageChars = 0;
+  private pendingUserMessagesRejected = false;
   private pendingGreeting: string | undefined;
   private speechSeenForBuffer = false;
   private consecutiveSilenceMs = 0;
@@ -275,6 +286,7 @@ class AnvilRealtimeVoiceBridge implements RealtimeVoiceBridge {
   private suppressUnidentifiedAudioAfterCancel = false;
   private resolveConnect: (() => void) | undefined;
   private rejectConnect: ((error: Error) => void) | undefined;
+  private connectPromise: Promise<void> | undefined;
   private connectTimer: ReturnType<typeof setTimeout> | undefined;
   private emittedFinalUserTranscriptItemIds = new Set<string>();
   private recentFinalUserTranscript: { text: string; at: number } | undefined;
@@ -289,8 +301,11 @@ class AnvilRealtimeVoiceBridge implements RealtimeVoiceBridge {
     if (this.ready) {
       return Promise.resolve();
     }
+    if (this.connectPromise) {
+      return this.connectPromise;
+    }
     this.intentionallyClosed = false;
-    return new Promise((resolve, reject) => {
+    this.connectPromise = new Promise((resolve, reject) => {
       this.resolveConnect = resolve;
       this.rejectConnect = reject;
       this.connectTimer = setTimeout(() => {
@@ -334,14 +349,44 @@ class AnvilRealtimeVoiceBridge implements RealtimeVoiceBridge {
         this.config.onClose?.("completed");
       });
     });
+    return this.connectPromise;
   }
 
   sendAudio(audio: Buffer): void {
+    if (this.intentionallyClosed || audio.length === 0) {
+      return;
+    }
+    if (
+      audio.length > ANVIL_REALTIME_MAX_AUDIO_CHUNK_BYTES ||
+      (this.audioFormat.encoding === "pcm16" && audio.length % 2 !== 0)
+    ) {
+      this.rejectInputAudio(
+        new Error(
+          audio.length > ANVIL_REALTIME_MAX_AUDIO_CHUNK_BYTES
+            ? `Speech to Speech realtime audio chunk exceeded ${ANVIL_REALTIME_MAX_AUDIO_CHUNK_BYTES} bytes`
+            : "Speech to Speech realtime PCM16 input must contain complete 16-bit samples",
+        ),
+      );
+      return;
+    }
     if (!this.ready) {
-      if (this.pendingAudio.length >= ANVIL_REALTIME_MAX_PENDING_AUDIO_CHUNKS) {
-        this.pendingAudio.shift();
+      if (this.pendingAudioRejected) {
+        return;
       }
-      this.pendingAudio.push(audio);
+      if (
+        this.pendingAudio.length >= ANVIL_REALTIME_MAX_PENDING_AUDIO_CHUNKS ||
+        audio.length > ANVIL_REALTIME_MAX_PENDING_AUDIO_BYTES - this.pendingAudioBytes
+      ) {
+        this.rejectInputAudio(
+          new Error(
+            `Speech to Speech realtime audio queued before readiness exceeded ${ANVIL_REALTIME_MAX_PENDING_AUDIO_CHUNKS} chunks or ${ANVIL_REALTIME_MAX_PENDING_AUDIO_BYTES} bytes`,
+          ),
+        );
+        return;
+      }
+      const copy = Buffer.from(audio);
+      this.pendingAudio.push(copy);
+      this.pendingAudioBytes += copy.length;
       return;
     }
     this.sendAudioNow(audio);
@@ -350,12 +395,39 @@ class AnvilRealtimeVoiceBridge implements RealtimeVoiceBridge {
   setMediaTimestamp(_ts: number): void {}
 
   sendUserMessage(text: string): void {
+    if (this.intentionallyClosed) {
+      return;
+    }
     const normalized = text.trim();
     if (!normalized) {
       return;
     }
+    if (normalized.length > ANVIL_REALTIME_MAX_USER_MESSAGE_CHARS) {
+      this.rejectPendingUserMessages(
+        new Error(
+          `Speech to Speech realtime user message exceeded ${ANVIL_REALTIME_MAX_USER_MESSAGE_CHARS} characters`,
+        ),
+      );
+      return;
+    }
     if (!this.ready) {
+      if (this.pendingUserMessagesRejected) {
+        return;
+      }
+      if (
+        this.pendingUserMessages.length >= ANVIL_REALTIME_MAX_PENDING_USER_MESSAGES ||
+        normalized.length >
+          ANVIL_REALTIME_MAX_PENDING_USER_CHARS - this.pendingUserMessageChars
+      ) {
+        this.rejectPendingUserMessages(
+          new Error(
+            `Speech to Speech realtime messages queued before readiness exceeded ${ANVIL_REALTIME_MAX_PENDING_USER_MESSAGES} messages or ${ANVIL_REALTIME_MAX_PENDING_USER_CHARS} characters`,
+          ),
+        );
+        return;
+      }
       this.pendingUserMessages.push(normalized);
+      this.pendingUserMessageChars += normalized.length;
       return;
     }
     this.sendJson({
@@ -373,8 +445,19 @@ class AnvilRealtimeVoiceBridge implements RealtimeVoiceBridge {
   }
 
   triggerGreeting(instructions?: string): void {
+    if (this.intentionallyClosed) {
+      return;
+    }
     const greeting =
       instructions?.trim() || "Start the voice session now. Greet the person briefly.";
+    if (greeting.length > ANVIL_REALTIME_MAX_USER_MESSAGE_CHARS) {
+      this.config.onError?.(
+        new Error(
+          `Speech to Speech realtime greeting exceeded ${ANVIL_REALTIME_MAX_USER_MESSAGE_CHARS} characters`,
+        ),
+      );
+      return;
+    }
     if (!this.ready) {
       this.pendingGreeting = greeting;
       return;
@@ -411,12 +494,35 @@ class AnvilRealtimeVoiceBridge implements RealtimeVoiceBridge {
     result: unknown,
     options?: RealtimeVoiceToolResultOptions,
   ): void {
+    if (this.intentionallyClosed || !this.ready) {
+      return;
+    }
+    let output: string;
+    try {
+      output = JSON.stringify(result ?? null);
+    } catch (error) {
+      this.config.onError?.(
+        new Error(
+          `Speech to Speech realtime tool result was not JSON-serializable: ${error instanceof Error ? error.message : String(error)}`,
+          { cause: error },
+        ),
+      );
+      return;
+    }
+    if (output.length > ANVIL_REALTIME_MAX_TOOL_RESULT_CHARS) {
+      this.config.onError?.(
+        new Error(
+          `Speech to Speech realtime tool result exceeded ${ANVIL_REALTIME_MAX_TOOL_RESULT_CHARS} characters`,
+        ),
+      );
+      return;
+    }
     this.sendJson({
       type: "conversation.item.create",
       item: {
         type: "function_call_output",
         call_id: callId,
-        output: JSON.stringify(result ?? null),
+        output,
         ...(options?.willContinue === true ? { will_continue: true } : {}),
         ...(options?.suppressResponse === true ? { suppress_response: true } : {}),
       },
@@ -430,7 +536,11 @@ class AnvilRealtimeVoiceBridge implements RealtimeVoiceBridge {
     this.connected = false;
     this.ready = false;
     this.pendingAudio = [];
+    this.pendingAudioBytes = 0;
+    this.pendingAudioRejected = false;
     this.pendingUserMessages = [];
+    this.pendingUserMessageChars = 0;
+    this.pendingUserMessagesRejected = false;
     this.pendingGreeting = undefined;
     this.activeResponseId = undefined;
     this.canceledResponseIds.clear();
@@ -439,7 +549,13 @@ class AnvilRealtimeVoiceBridge implements RealtimeVoiceBridge {
     this.recentFinalUserTranscript = undefined;
     this.deliveredToolCallKeys.clear();
     this.resetInputBufferState();
-    this.clearConnectTimer();
+    if (this.rejectConnect) {
+      this.settleConnectError(
+        new Error("Speech to Speech realtime connection closed before readiness"),
+      );
+    } else {
+      this.clearConnectTimer();
+    }
     const socket = this.socket;
     this.socket = null;
     socket?.close();
@@ -454,6 +570,7 @@ class AnvilRealtimeVoiceBridge implements RealtimeVoiceBridge {
     this.clearConnectTimer();
     this.resolveConnect = undefined;
     this.rejectConnect = undefined;
+    this.connectPromise = undefined;
     resolve?.();
   }
 
@@ -462,6 +579,7 @@ class AnvilRealtimeVoiceBridge implements RealtimeVoiceBridge {
     this.clearConnectTimer();
     this.resolveConnect = undefined;
     this.rejectConnect = undefined;
+    this.connectPromise = undefined;
     reject?.(error);
   }
 
@@ -506,10 +624,16 @@ class AnvilRealtimeVoiceBridge implements RealtimeVoiceBridge {
   }
 
   private flushPending(): void {
-    for (const audio of this.pendingAudio.splice(0)) {
+    const pendingAudio = this.pendingAudio.splice(0);
+    this.pendingAudioBytes = 0;
+    this.pendingAudioRejected = false;
+    const pendingUserMessages = this.pendingUserMessages.splice(0);
+    this.pendingUserMessageChars = 0;
+    this.pendingUserMessagesRejected = false;
+    for (const audio of pendingAudio) {
       this.sendAudioNow(audio);
     }
-    for (const text of this.pendingUserMessages.splice(0)) {
+    for (const text of pendingUserMessages) {
       this.sendUserMessage(text);
     }
     if (this.pendingGreeting !== undefined) {
@@ -543,6 +667,24 @@ class AnvilRealtimeVoiceBridge implements RealtimeVoiceBridge {
       this.sendJson({ type: "input_audio_buffer.commit" });
       this.resetInputBufferState();
     }
+  }
+
+  private rejectInputAudio(error: Error): void {
+    this.pendingAudio = [];
+    this.pendingAudioBytes = 0;
+    this.pendingAudioRejected = !this.ready;
+    if (this.ready) {
+      this.sendJson({ type: "input_audio_buffer.clear" });
+    }
+    this.resetInputBufferState();
+    this.config.onError?.(error);
+  }
+
+  private rejectPendingUserMessages(error: Error): void {
+    this.pendingUserMessages = [];
+    this.pendingUserMessageChars = 0;
+    this.pendingUserMessagesRejected = !this.ready;
+    this.config.onError?.(error);
   }
 
   private resetInputBufferState(): void {
@@ -811,10 +953,11 @@ class AnvilRealtimeVoiceBridge implements RealtimeVoiceBridge {
   }
 }
 
-export function buildAnvilRealtimeVoiceProvider(): RealtimeVoiceProviderPlugin {
+export function buildAnvilServingRealtimeVoiceProvider(): RealtimeVoiceProviderPlugin {
   return {
     id: ANVIL_REALTIME_PROVIDER_ID,
     label: ANVIL_REALTIME_LABEL,
+    aliases: ANVIL_REALTIME_PROVIDER_ALIASES,
     defaultModel: ANVIL_REALTIME_DEFAULT_MODEL,
     capabilities: {
       transports: ["gateway-relay"],
@@ -836,7 +979,7 @@ export function buildAnvilRealtimeVoiceProvider(): RealtimeVoiceProviderPlugin {
     createBridge: (req) => {
       const config = normalizeProviderConfig(req.providerConfig);
       if (!config.realtimeUrl) {
-        throw new Error("Speech to Speech realtime URL missing");
+        throw new Error("Anvil Serving Realtime URL is missing");
       }
       return new AnvilRealtimeVoiceBridge({
         ...req,
@@ -851,3 +994,6 @@ export function buildAnvilRealtimeVoiceProvider(): RealtimeVoiceProviderPlugin {
     },
   };
 }
+
+/** @deprecated Use buildAnvilServingRealtimeVoiceProvider. */
+export const buildAnvilRealtimeVoiceProvider = buildAnvilServingRealtimeVoiceProvider;

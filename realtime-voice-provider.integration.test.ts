@@ -9,7 +9,7 @@ import {
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocketServer } from "ws";
 import type { RawData, WebSocket } from "ws";
-import { buildAnvilRealtimeVoiceProvider } from "./realtime-voice-provider.js";
+import { buildAnvilServingRealtimeVoiceProvider } from "./realtime-voice-provider.js";
 
 type AnvilTestEvent = {
   type: string;
@@ -103,7 +103,7 @@ class FakeAnvilRealtimeServer {
   send(event: AnvilTestEvent): void {
     const socket = this.sockets[0];
     if (!socket) {
-      throw new Error("fake Anvil realtime server has no connected socket");
+      throw new Error("fake Anvil Serving Realtime server has no connected socket");
     }
     socket.send(JSON.stringify(event));
   }
@@ -163,7 +163,7 @@ function createBridge(
     onReady: vi.fn<NonNullable<RealtimeVoiceBridgeCallbacks["onReady"]>>(),
     onTranscript: vi.fn<NonNullable<RealtimeVoiceBridgeCallbacks["onTranscript"]>>(),
   };
-  const provider = buildAnvilRealtimeVoiceProvider();
+  const provider = buildAnvilServingRealtimeVoiceProvider();
   const bridge = provider.createBridge({
     providerConfig: {
       realtimeUrl: server.url,
@@ -177,7 +177,7 @@ function createBridge(
   return { bridge, callbacks, connecting: bridge.connect() };
 }
 
-describe("Anvil realtime voice provider against a fake server", () => {
+describe("Anvil Serving Realtime provider against a fake server", () => {
   afterEach(async () => {
     while (activeServers.length > 0) {
       await activeServers.pop()?.close();

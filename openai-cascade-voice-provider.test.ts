@@ -27,6 +27,10 @@ function waitForAssertion(assertion: () => void, timeoutMs = 1000): Promise<void
   });
 }
 
+function rawPcmResponse(audio = Buffer.alloc(640, 1)): Response {
+  return new Response(audio, { headers: { "Content-Type": "audio/pcm" } });
+}
+
 describe("OpenAI-compatible speech-to-speech provider", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -50,7 +54,7 @@ describe("OpenAI-compatible speech-to-speech provider", () => {
           { status: 200 },
         ),
       )
-      .mockResolvedValueOnce(new Response(Buffer.alloc(640, 3), { status: 200 }));
+      .mockResolvedValueOnce(rawPcmResponse(Buffer.alloc(640, 3)));
     vi.stubGlobal("fetch", fetchMock);
 
     const onAudio = vi.fn<RealtimeVoiceBridgeCallbacks["onAudio"]>();
@@ -119,11 +123,11 @@ describe("OpenAI-compatible speech-to-speech provider", () => {
       .mockResolvedValueOnce(
         new Response(JSON.stringify({ choices: [{ message: { content: "Nice to meet you, Ada." } }] })),
       )
-      .mockResolvedValueOnce(new Response(Buffer.alloc(640, 1)))
+      .mockResolvedValueOnce(rawPcmResponse())
       .mockResolvedValueOnce(
         new Response(JSON.stringify({ choices: [{ message: { content: "Your name is Ada." } }] })),
       )
-      .mockResolvedValueOnce(new Response(Buffer.alloc(640, 1)));
+      .mockResolvedValueOnce(rawPcmResponse());
     vi.stubGlobal("fetch", fetchMock);
     const onAudio = vi.fn<RealtimeVoiceBridgeCallbacks["onAudio"]>();
     const bridge = buildOpenAICascadeVoiceProvider().createBridge({
@@ -158,7 +162,7 @@ describe("OpenAI-compatible speech-to-speech provider", () => {
           JSON.stringify({ choices: [{ message: { content: `reply-${reply++}` } }] }),
         );
       }
-      return new Response(Buffer.alloc(640, 1));
+      return rawPcmResponse();
     });
     vi.stubGlobal("fetch", fetchMock);
     const onAudio = vi.fn<RealtimeVoiceBridgeCallbacks["onAudio"]>();
@@ -190,6 +194,95 @@ describe("OpenAI-compatible speech-to-speech provider", () => {
       onAudio: vi.fn(),
       onClearAudio: vi.fn(),
     })).toThrow("requestTimeoutMs must be an integer between 1 and 2147483647 milliseconds");
+  });
+
+  it("rejects impossible TTS sample rates instead of silently defaulting", () => {
+    expect(() => buildOpenAICascadeVoiceProvider().createBridge({
+      providerConfig: standaloneConfig({ ttsSampleRateHz: 1 }),
+      onAudio: vi.fn(),
+      onClearAudio: vi.fn(),
+    })).toThrow("ttsSampleRateHz must be an integer between 8000 and 384000");
+  });
+
+  it("does not start a text turn after the bridge is closed", async () => {
+    const fetchMock = vi.fn<typeof fetch>();
+    vi.stubGlobal("fetch", fetchMock);
+    const bridge = buildOpenAICascadeVoiceProvider().createBridge({
+      providerConfig: standaloneConfig(),
+      onAudio: vi.fn(),
+      onClearAudio: vi.fn(),
+      onError: vi.fn(),
+    });
+
+    await bridge.connect();
+    bridge.close();
+    bridge.sendUserMessage?.("This must not reach an upstream endpoint.");
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects oversized direct text turns before any upstream request", async () => {
+    const fetchMock = vi.fn<typeof fetch>();
+    vi.stubGlobal("fetch", fetchMock);
+    const onError = vi.fn<NonNullable<RealtimeVoiceBridgeCallbacks["onError"]>>();
+    const bridge = buildOpenAICascadeVoiceProvider().createBridge({
+      providerConfig: standaloneConfig(),
+      onAudio: vi.fn(),
+      onClearAudio: vi.fn(),
+      onError,
+    });
+
+    await bridge.connect();
+    bridge.sendUserMessage?.("x".repeat((64 * 1024) + 1));
+
+    expect(onError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: expect.stringContaining("user message exceeded") }),
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects incomplete PCM16 samples before conversion", async () => {
+    const fetchMock = vi.fn<typeof fetch>();
+    vi.stubGlobal("fetch", fetchMock);
+    const onError = vi.fn<NonNullable<RealtimeVoiceBridgeCallbacks["onError"]>>();
+    const bridge = buildOpenAICascadeVoiceProvider().createBridge({
+      providerConfig: standaloneConfig(),
+      audioFormat: REALTIME_VOICE_AUDIO_FORMAT_PCM16_24KHZ,
+      onAudio: vi.fn(),
+      onClearAudio: vi.fn(),
+      onError,
+    });
+
+    await bridge.connect();
+    bridge.sendAudio(Buffer.alloc(3, 1));
+
+    expect(onError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: expect.stringContaining("complete 16-bit samples") }),
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("bounds the number of buffered audio chunks as well as their bytes", async () => {
+    const fetchMock = vi.fn<typeof fetch>();
+    vi.stubGlobal("fetch", fetchMock);
+    const onError = vi.fn<NonNullable<RealtimeVoiceBridgeCallbacks["onError"]>>();
+    const bridge = buildOpenAICascadeVoiceProvider().createBridge({
+      providerConfig: standaloneConfig(),
+      audioFormat: REALTIME_VOICE_AUDIO_FORMAT_PCM16_24KHZ,
+      onAudio: vi.fn(),
+      onClearAudio: vi.fn(),
+      onError,
+    });
+
+    await bridge.connect();
+    for (let chunk = 0; chunk <= 4_096; chunk += 1) {
+      bridge.sendAudio(Buffer.alloc(480, 1));
+    }
+
+    expect(onError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: expect.stringContaining("4096 chunks") }),
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("rejects oversized input before mulaw decoding and resampling", async () => {
@@ -245,7 +338,7 @@ describe("OpenAI-compatible speech-to-speech provider", () => {
           new Response(JSON.stringify({ choices: [{ message: { content: "Second reply" } }] })),
         );
       }
-      return Promise.resolve(new Response(Buffer.alloc(640, 2)));
+      return Promise.resolve(rawPcmResponse(Buffer.alloc(640, 2)));
     });
     vi.stubGlobal("fetch", fetchMock);
     const onAudio = vi.fn<RealtimeVoiceBridgeCallbacks["onAudio"]>();
@@ -292,10 +385,95 @@ describe("OpenAI-compatible speech-to-speech provider", () => {
 
     await waitForAssertion(() => expect(onError).toHaveBeenCalledTimes(1));
     expect(onAudio).not.toHaveBeenCalled();
-    expect(onError.mock.calls[0]?.[0].message).toContain("not raw PCM");
+    expect(onError.mock.calls[0]?.[0].message).toContain("not explicitly typed as raw PCM");
     expect(onEvent).toHaveBeenCalledWith(
       expect.objectContaining({ type: "response.done", detail: "status=failed" }),
     );
+  });
+
+  it("rejects a headerless TTS response without an explicit raw-PCM content type", async () => {
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ choices: [{ message: { content: "Hello" } }] })),
+      )
+      .mockResolvedValueOnce(new Response(Buffer.alloc(640, 1)));
+    vi.stubGlobal("fetch", fetchMock);
+    const onAudio = vi.fn<RealtimeVoiceBridgeCallbacks["onAudio"]>();
+    const onError = vi.fn<NonNullable<RealtimeVoiceBridgeCallbacks["onError"]>>();
+    const bridge = buildOpenAICascadeVoiceProvider().createBridge({
+      providerConfig: standaloneConfig(),
+      onAudio,
+      onClearAudio: vi.fn(),
+      onError,
+    });
+
+    await bridge.connect();
+    bridge.sendUserMessage?.("Hello");
+
+    await waitForAssertion(() => expect(onError).toHaveBeenCalledTimes(1));
+    expect(onAudio).not.toHaveBeenCalled();
+    expect(onError.mock.calls[0]?.[0].message).toContain("content-type missing");
+  });
+
+  it("rejects encoded audio even when an endpoint labels it as raw PCM", async () => {
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ choices: [{ message: { content: "Hello" } }] })),
+      )
+      .mockResolvedValueOnce(
+        rawPcmResponse(Buffer.concat([Buffer.from("OggS"), Buffer.alloc(636, 1)])),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const onAudio = vi.fn<RealtimeVoiceBridgeCallbacks["onAudio"]>();
+    const onError = vi.fn<NonNullable<RealtimeVoiceBridgeCallbacks["onError"]>>();
+    const bridge = buildOpenAICascadeVoiceProvider().createBridge({
+      providerConfig: standaloneConfig(),
+      onAudio,
+      onClearAudio: vi.fn(),
+      onError,
+    });
+
+    await bridge.connect();
+    bridge.sendUserMessage?.("Hello");
+
+    await waitForAssertion(() => expect(onError).toHaveBeenCalledTimes(1));
+    expect(onAudio).not.toHaveBeenCalled();
+    expect(onError.mock.calls[0]?.[0].message).toContain("not valid raw PCM16");
+  });
+
+  it("does not remember an assistant answer that failed before audio delivery", async () => {
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ choices: [{ message: { content: "Unheard answer" } }] })),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: "wrong format" }), {
+          headers: { "Content-Type": "application/json" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ choices: [{ message: { content: "Audible answer" } }] })),
+      )
+      .mockResolvedValueOnce(rawPcmResponse());
+    vi.stubGlobal("fetch", fetchMock);
+    const onAudio = vi.fn<RealtimeVoiceBridgeCallbacks["onAudio"]>();
+    const onError = vi.fn<NonNullable<RealtimeVoiceBridgeCallbacks["onError"]>>();
+    const bridge = buildOpenAICascadeVoiceProvider().createBridge({
+      providerConfig: standaloneConfig(),
+      onAudio,
+      onClearAudio: vi.fn(),
+      onError,
+    });
+
+    await bridge.connect();
+    bridge.sendUserMessage?.("First turn");
+    await waitForAssertion(() => expect(onError).toHaveBeenCalledTimes(1));
+    bridge.sendUserMessage?.("Second turn");
+    await waitForAssertion(() => expect(onAudio).toHaveBeenCalledTimes(1));
+
+    expect(JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body)).messages).toEqual([
+      { role: "user", content: "Second turn" },
+    ]);
   });
 });
 

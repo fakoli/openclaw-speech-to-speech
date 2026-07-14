@@ -7,7 +7,7 @@ import {
 } from "openclaw/plugin-sdk/realtime-voice";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  buildAnvilRealtimeVoiceProvider,
+  buildAnvilServingRealtimeVoiceProvider,
   resolveAnvilRealtimeUrl,
 } from "./realtime-voice-provider.js";
 
@@ -113,7 +113,7 @@ function createOpenBridge(
     tools?: RealtimeVoiceTool[];
   } = {},
 ) {
-  const provider = buildAnvilRealtimeVoiceProvider();
+  const provider = buildAnvilServingRealtimeVoiceProvider();
   const onAudio = vi.fn();
   const onClearAudio = vi.fn();
   const onError = vi.fn();
@@ -142,7 +142,7 @@ function createOpenBridge(
   const connecting = bridge.connect();
   const socket = FakeWebSocket.instances[0];
   if (!socket) {
-    throw new Error("expected Anvil websocket");
+    throw new Error("expected Anvil Serving WebSocket");
   }
   socket.readyState = FakeWebSocket.OPEN;
   socket.emit("open");
@@ -168,7 +168,7 @@ async function finishReady(
   await connecting;
 }
 
-describe("buildAnvilRealtimeVoiceProvider", () => {
+describe("buildAnvilServingRealtimeVoiceProvider", () => {
   beforeEach(() => {
     FakeWebSocket.instances = [];
   });
@@ -179,10 +179,11 @@ describe("buildAnvilRealtimeVoiceProvider", () => {
   });
 
   it("declares gateway-relay realtime Talk capabilities for catalog selection", () => {
-    const provider = buildAnvilRealtimeVoiceProvider();
+    const provider = buildAnvilServingRealtimeVoiceProvider();
 
-    expect(provider.id).toBe("anvil");
-    expect(provider.label).toBe("Speech to Speech");
+    expect(provider.id).toBe("anvil-serving");
+    expect(provider.label).toBe("Anvil Serving Realtime");
+    expect(provider.aliases).toEqual(["anvil"]);
     expect(provider.defaultModel).toBe("fast-local");
     expect(provider.capabilities).toEqual({
       transports: ["gateway-relay"],
@@ -200,7 +201,7 @@ describe("buildAnvilRealtimeVoiceProvider", () => {
     });
   });
 
-  it("normalizes base URLs into the Anvil realtime WebSocket endpoint", () => {
+  it("normalizes base URLs into the Anvil Serving Realtime WebSocket endpoint", () => {
     expect(resolveAnvilRealtimeUrl({ baseUrl: "http://127.0.0.1:8765" })).toBe(
       "ws://127.0.0.1:8765/v1/realtime",
     );
@@ -233,8 +234,8 @@ describe("buildAnvilRealtimeVoiceProvider", () => {
     }
   });
 
-  it("requires an explicit Anvil realtime URL before provider selection", () => {
-    const provider = buildAnvilRealtimeVoiceProvider();
+  it("requires an explicit Anvil Serving Realtime URL before provider selection", () => {
+    const provider = buildAnvilServingRealtimeVoiceProvider();
 
     expect(provider.isConfigured({ providerConfig: {} })).toBe(false);
     expect(
@@ -244,7 +245,23 @@ describe("buildAnvilRealtimeVoiceProvider", () => {
     ).toBe(true);
   });
 
-  it("connects with bearer auth and sends an Anvil session update", async () => {
+  it("keeps the legacy anvil provider configuration key working", () => {
+    const provider = buildAnvilServingRealtimeVoiceProvider();
+
+    expect(
+      provider.isConfigured({
+        providerConfig: {
+          providers: {
+            anvil: {
+              baseUrl: "http://127.0.0.1:8765",
+            },
+          },
+        },
+      }),
+    ).toBe(true);
+  });
+
+  it("connects with bearer auth and sends an Anvil Serving session update", async () => {
     const { connecting, onReady, socket } = createOpenBridge({
       apiKey: "anvil-token",
       model: "fast-local",
@@ -288,7 +305,7 @@ describe("buildAnvilRealtimeVoiceProvider", () => {
     });
   });
 
-  it("sends realtime tools in the Anvil session update", async () => {
+  it("sends realtime tools in the Anvil Serving session update", async () => {
     const { connecting, socket } = createOpenBridge(
       {},
       {
@@ -325,7 +342,7 @@ describe("buildAnvilRealtimeVoiceProvider", () => {
     expect(session?.tool_choice).toBe("auto");
   });
 
-  it("rejects connect when Anvil never acknowledges the session update", async () => {
+  it("rejects connect when Anvil Serving never acknowledges the session update", async () => {
     vi.useFakeTimers();
     const { connecting, onError } = createOpenBridge();
     const rejected = expect(connecting).rejects.toThrow("session.updated timed out");
@@ -340,7 +357,7 @@ describe("buildAnvilRealtimeVoiceProvider", () => {
     );
   });
 
-  it("resamples relay audio to Anvil PCM16 and commits after sustained silence", async () => {
+  it("resamples relay audio to Anvil Serving PCM16 and commits after sustained silence", async () => {
     const { bridge, connecting, socket } = createOpenBridge({ silenceDurationMs: 20 });
     await finishReady(socket, connecting);
 
@@ -415,7 +432,85 @@ describe("buildAnvilRealtimeVoiceProvider", () => {
     ]);
   });
 
-  it("maps Anvil audio and transcript server events into bridge callbacks", async () => {
+  it("shares an in-flight connection and rejects it when closed before readiness", async () => {
+    const { bridge, connecting } = createOpenBridge();
+    const duplicate = bridge.connect();
+    const rejected = expect(connecting).rejects.toThrow("closed before readiness");
+
+    expect(duplicate).toBe(connecting);
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    bridge.close();
+
+    await rejected;
+  });
+
+  it("copies queued audio so caller mutation cannot change the pending turn", async () => {
+    const { bridge, connecting, socket } = createOpenBridge();
+    const audio = Buffer.alloc(480, 1);
+
+    bridge.sendAudio(audio);
+    audio.fill(0);
+    await finishReady(socket, connecting);
+
+    const queuedAudio = Buffer.from(parseSent(socket)[1]?.audio ?? "", "base64");
+    expect(queuedAudio.some((byte) => byte !== 0)).toBe(true);
+  });
+
+  it("fails closed when pre-ready audio exceeds the queue boundary", async () => {
+    const { bridge, connecting, onError, socket } = createOpenBridge();
+
+    for (let chunk = 0; chunk <= 320; chunk += 1) {
+      bridge.sendAudio(Buffer.alloc(480, 1));
+    }
+
+    expect(onError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: expect.stringContaining("queued before readiness exceeded") }),
+    );
+    await finishReady(socket, connecting);
+    expect(parseSent(socket).map((event) => event.type)).toEqual(["session.update"]);
+  });
+
+  it("rejects oversized and incomplete realtime audio chunks", async () => {
+    const { bridge, connecting, onError, socket } = createOpenBridge();
+    await finishReady(socket, connecting);
+
+    bridge.sendAudio(Buffer.alloc((1024 * 1024) + 1, 1));
+    bridge.sendAudio(Buffer.alloc(3, 1));
+
+    expect(onError).toHaveBeenCalledTimes(2);
+    expect(parseSent(socket).slice(-2).map((event) => event.type)).toEqual([
+      "input_audio_buffer.clear",
+      "input_audio_buffer.clear",
+    ]);
+  });
+
+  it("fails closed when pre-ready text exceeds the queue boundary", async () => {
+    const { bridge, connecting, onError, socket } = createOpenBridge();
+
+    for (let message = 0; message <= 64; message += 1) {
+      bridge.sendUserMessage?.(`message-${message}`);
+    }
+
+    expect(onError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: expect.stringContaining("messages queued before readiness exceeded") }),
+    );
+    await finishReady(socket, connecting);
+    expect(parseSent(socket).map((event) => event.type)).toEqual(["session.update"]);
+  });
+
+  it("ignores audio and text submitted after close", async () => {
+    const { bridge, connecting, socket } = createOpenBridge();
+    await finishReady(socket, connecting);
+    const sentBeforeClose = socket.sent.length;
+
+    bridge.close();
+    bridge.sendAudio(Buffer.alloc(480, 1));
+    bridge.sendUserMessage?.("Do not send this.");
+
+    expect(socket.sent).toHaveLength(sentBeforeClose);
+  });
+
+  it("maps Anvil Serving audio and transcript server events into bridge callbacks", async () => {
     const { connecting, onAudio, onEvent, onTranscript, socket } = createOpenBridge();
     await finishReady(socket, connecting);
     const anvilPcm16k = Buffer.alloc(320, 2);
@@ -483,7 +578,7 @@ describe("buildAnvilRealtimeVoiceProvider", () => {
     });
   });
 
-  it("emits tool calls from Anvil function-call item events", async () => {
+  it("emits tool calls from Anvil Serving function-call item events", async () => {
     const { connecting, onToolCall, socket } = createOpenBridge();
     await finishReady(socket, connecting);
 
@@ -509,7 +604,7 @@ describe("buildAnvilRealtimeVoiceProvider", () => {
     });
   });
 
-  it("emits tool calls from standard Anvil Realtime function-call events", async () => {
+  it("emits tool calls from standard Anvil Serving Realtime function-call events", async () => {
     const { connecting, onToolCall, socket } = createOpenBridge();
     await finishReady(socket, connecting);
 
@@ -569,7 +664,7 @@ describe("buildAnvilRealtimeVoiceProvider", () => {
     );
   });
 
-  it("round trips an Anvil function call through OpenClaw tool output with the same call id", async () => {
+  it("round trips an Anvil Serving function call through OpenClaw with the same call id", async () => {
     const bridgeRef: { current?: { submitToolResult: (callId: string, result: unknown) => void } } =
       {};
     const { bridge, connecting, onToolCall, socket } = createOpenBridge(
@@ -610,7 +705,7 @@ describe("buildAnvilRealtimeVoiceProvider", () => {
     });
   });
 
-  it("submits Anvil function-call outputs with continuation options", async () => {
+  it("submits Anvil Serving function-call outputs with continuation options", async () => {
     const { bridge, connecting, socket } = createOpenBridge();
     await finishReady(socket, connecting);
 
@@ -639,7 +734,7 @@ describe("buildAnvilRealtimeVoiceProvider", () => {
     ]);
   });
 
-  it("deduplicates final user transcripts emitted through both Anvil item events", async () => {
+  it("deduplicates final user transcripts emitted through both Anvil Serving item events", async () => {
     const { connecting, onTranscript, socket } = createOpenBridge();
     await finishReady(socket, connecting);
 
@@ -693,7 +788,7 @@ describe("buildAnvilRealtimeVoiceProvider", () => {
     ]);
   });
 
-  it("cancels Anvil output and clears relay audio on barge-in", async () => {
+  it("cancels Anvil Serving output and clears relay audio on barge-in", async () => {
     const { bridge, connecting, onClearAudio, onEvent, socket } = createOpenBridge();
     await finishReady(socket, connecting);
     socket.emit(

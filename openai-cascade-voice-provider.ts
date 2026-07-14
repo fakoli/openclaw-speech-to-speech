@@ -19,14 +19,18 @@ import { isPrivateOrLoopbackHost } from "openclaw/plugin-sdk/ssrf-runtime";
 import { asFiniteNumber, normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
 
 const OPENAI_CASCADE_PROVIDER_ID = "openai-cascade";
-const OPENAI_CASCADE_LABEL = "Speech to Speech (OpenAI-compatible)";
+const OPENAI_CASCADE_LABEL = "OpenAI-Compatible Cascade";
 const SAMPLE_RATE_HZ = 16_000;
 const DEFAULT_SILENCE_DURATION_MS = 200;
 const DEFAULT_TTS_SAMPLE_RATE_HZ = 24_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 const MAX_REQUEST_TIMEOUT_MS = 2_147_483_647;
+const MIN_TTS_SAMPLE_RATE_HZ = 8_000;
+const MAX_TTS_SAMPLE_RATE_HZ = 384_000;
 const SILENCE_SAMPLE_ABS_THRESHOLD = 256;
 const MAX_BUFFERED_AUDIO_BYTES = 10 * 1024 * 1024;
+const MAX_BUFFERED_AUDIO_CHUNKS = 4_096;
+const MAX_TURN_TEXT_CHARS = 64 * 1024;
 const MAX_CONVERSATION_TURNS = 12;
 const MAX_CONVERSATION_CHARS = 64 * 1024;
 const MAX_JSON_RESPONSE_BYTES = 1024 * 1024;
@@ -98,6 +102,23 @@ function normalizeRequestTimeoutMs(value: unknown): number | undefined {
   return timeoutMs;
 }
 
+function normalizeTtsSampleRateHz(value: unknown): number | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  const sampleRateHz = asPositiveInteger(value);
+  if (
+    sampleRateHz === undefined ||
+    sampleRateHz < MIN_TTS_SAMPLE_RATE_HZ ||
+    sampleRateHz > MAX_TTS_SAMPLE_RATE_HZ
+  ) {
+    throw new Error(
+      `Speech to Speech ttsSampleRateHz must be an integer between ${MIN_TTS_SAMPLE_RATE_HZ} and ${MAX_TTS_SAMPLE_RATE_HZ}`,
+    );
+  }
+  return sampleRateHz;
+}
+
 function normalizeProviderConfig(config: RealtimeVoiceProviderConfig): OpenAICascadeProviderConfig {
   const raw = resolveProviderConfigRecord(config);
   const apiKey = raw.apiKey ?? raw.token;
@@ -120,7 +141,7 @@ function normalizeProviderConfig(config: RealtimeVoiceProviderConfig): OpenAICas
       path: "plugins.entries.speech-to-speech.config.ttsApiKey",
     }),
     ttsModel: normalizeOptionalString(raw.ttsModel),
-    ttsSampleRateHz: asPositiveInteger(raw.ttsSampleRateHz),
+    ttsSampleRateHz: normalizeTtsSampleRateHz(raw.ttsSampleRateHz),
     voice: normalizeOptionalString(raw.speakerVoice ?? raw.voice),
     silenceDurationMs: asNonNegativeInteger(raw.silenceDurationMs),
     requestTimeoutMs: normalizeRequestTimeoutMs(raw.requestTimeoutMs),
@@ -337,10 +358,20 @@ class OpenAICascadeVoiceBridge implements RealtimeVoiceBridge {
   setMediaTimestamp(_ts: number): void {}
 
   sendUserMessage(text: string): void {
-    const normalized = text.trim();
-    if (normalized) {
-      void this.respondToText(normalized);
+    if (!this.connected || this.intentionallyClosed) {
+      return;
     }
+    const normalized = text.trim();
+    if (!normalized) {
+      return;
+    }
+    if (normalized.length > MAX_TURN_TEXT_CHARS) {
+      this.config.onError?.(
+        new Error(`Speech to Speech user message exceeded ${MAX_TURN_TEXT_CHARS} characters`),
+      );
+      return;
+    }
+    void this.respondToText(normalized);
   }
 
   triggerGreeting(instructions?: string): void {
@@ -381,6 +412,13 @@ class OpenAICascadeVoiceBridge implements RealtimeVoiceBridge {
   }
 
   private canAcceptInputAudio(audio: Buffer): boolean {
+    if (this.audioFormat.encoding === "pcm16" && audio.length % 2 !== 0) {
+      this.clearInputBuffer();
+      this.config.onError?.(
+        new Error("Speech to Speech PCM16 input must contain complete 16-bit samples"),
+      );
+      return false;
+    }
     const inputSamples = this.audioFormat.encoding === "pcm16" ? Math.floor(audio.length / 2) : audio.length;
     const estimatedPcmBytes = Math.floor(
       (inputSamples * SAMPLE_RATE_HZ) / this.audioFormat.sampleRateHz,
@@ -414,15 +452,21 @@ class OpenAICascadeVoiceBridge implements RealtimeVoiceBridge {
   }
 
   private bufferAudio(audio: Buffer): boolean {
-    if (audio.length > MAX_BUFFERED_AUDIO_BYTES - this.bufferedAudioBytes) {
+    if (
+      this.bufferedAudio.length >= MAX_BUFFERED_AUDIO_CHUNKS ||
+      audio.length > MAX_BUFFERED_AUDIO_BYTES - this.bufferedAudioBytes
+    ) {
       this.clearInputBuffer();
       this.config.onError?.(
-        new Error(`Speech to Speech input audio exceeded ${MAX_BUFFERED_AUDIO_BYTES} bytes`),
+        new Error(
+          `Speech to Speech input audio exceeded ${MAX_BUFFERED_AUDIO_CHUNKS} chunks or ${MAX_BUFFERED_AUDIO_BYTES} bytes`,
+        ),
       );
       return false;
     }
-    this.bufferedAudio.push(audio);
-    this.bufferedAudioBytes += audio.length;
+    const copy = Buffer.from(audio);
+    this.bufferedAudio.push(copy);
+    this.bufferedAudioBytes += copy.length;
     return true;
   }
 
@@ -503,17 +547,17 @@ class OpenAICascadeVoiceBridge implements RealtimeVoiceBridge {
       if (!this.isCurrent(turn)) {
         return;
       }
-      this.rememberConversationTurn(text, response);
-      this.config.onTranscript?.("assistant", response, true);
       responseId = `cascade-${randomUUID()}`;
       this.config.onEvent?.({ direction: "server", type: "response.created", responseId });
       const audio = await this.synthesize(response, requestSignal);
-      if (this.isCurrent(turn) && audio.length > 0) {
-        this.config.onAudio(this.fromOutputPcm(audio));
+      if (!this.isCurrent(turn)) {
+        return;
       }
-      if (this.isCurrent(turn)) {
-        this.config.onEvent?.({ direction: "server", type: "response.done", responseId });
-      }
+      const outputAudio = this.fromOutputPcm(audio);
+      this.rememberConversationTurn(text, response);
+      this.config.onTranscript?.("assistant", response, true);
+      this.config.onAudio(outputAudio);
+      this.config.onEvent?.({ direction: "server", type: "response.done", responseId });
     } catch (error) {
       if (responseId && this.isCurrent(turn)) {
         this.config.onEvent?.({
@@ -553,6 +597,9 @@ class OpenAICascadeVoiceBridge implements RealtimeVoiceBridge {
       if (!text) {
         throw new Error("Speech to Speech STT response did not include text");
       }
+      if (text.length > MAX_TURN_TEXT_CHARS) {
+        throw new Error(`Speech to Speech STT response exceeded ${MAX_TURN_TEXT_CHARS} characters`);
+      }
       return text;
     } finally {
       request.cleanup();
@@ -586,6 +633,9 @@ class OpenAICascadeVoiceBridge implements RealtimeVoiceBridge {
       if (!content) {
         throw new Error("Speech to Speech LLM response did not include assistant text");
       }
+      if (content.length > MAX_TURN_TEXT_CHARS) {
+        throw new Error(`Speech to Speech LLM response exceeded ${MAX_TURN_TEXT_CHARS} characters`);
+      }
       return content;
     } finally {
       request.cleanup();
@@ -611,12 +661,14 @@ class OpenAICascadeVoiceBridge implements RealtimeVoiceBridge {
         throw await errorForResponse("TTS", response);
       }
       const contentType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
-      if (contentType && !["application/octet-stream", "audio/l16", "audio/pcm", "audio/raw"].includes(contentType)) {
-        throw new Error(`Speech to Speech TTS response was not raw PCM (content-type ${contentType})`);
+      if (!contentType || !["application/octet-stream", "audio/l16", "audio/pcm", "audio/raw"].includes(contentType)) {
+        throw new Error(
+          `Speech to Speech TTS response was not explicitly typed as raw PCM (content-type ${contentType ?? "missing"})`,
+        );
       }
       const bytes = await readResponseBytes(response, MAX_TTS_RESPONSE_BYTES, "TTS");
       const audio = Buffer.from(bytes);
-      if (audio.length === 0 || audio.length % 2 !== 0 || audio.subarray(0, 4).toString("ascii") === "RIFF") {
+      if (audio.length === 0 || audio.length % 2 !== 0 || hasEncodedAudioHeader(audio)) {
         throw new Error("Speech to Speech TTS response was not valid raw PCM16 audio");
       }
       return audio;
@@ -635,6 +687,15 @@ class OpenAICascadeVoiceBridge implements RealtimeVoiceBridge {
     }
     this.config.onError?.(error instanceof Error ? error : new Error(String(error)));
   }
+}
+
+function hasEncodedAudioHeader(audio: Buffer): boolean {
+  const prefix = audio.subarray(0, 4).toString("ascii");
+  return (
+    ["RIFF", "FORM", "OggS", "fLaC", "caff", ".snd"].includes(prefix) ||
+    audio.subarray(0, 3).toString("ascii") === "ID3" ||
+    audio.subarray(4, 8).toString("ascii") === "ftyp"
+  );
 }
 
 function authHeaders(apiKey: string | undefined): Record<string, string> {
