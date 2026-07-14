@@ -1,9 +1,30 @@
 {
   "name": "@fakoli/openclaw-speech-to-speech",
   "version": "0.1.0",
-  "description": "Realtime speech-to-speech voice provider plugin for OpenClaw",
+  "description": "Realtime speech-to-speech providers for OpenClaw using Anvil or user-owned OpenAI-compatible endpoints",
   "type": "module",
   "license": "MIT",
+  "author": "Sekou Doumbouya",
+  "homepage": "https://github.com/fakoli/openclaw-speech-to-speech#readme",
+  "bugs": {
+    "url": "https://github.com/fakoli/openclaw-speech-to-speech/issues"
+  },
+  "keywords": [
+    "openclaw",
+    "speech-to-speech",
+    "realtime",
+    "voice",
+    "stt",
+    "tts",
+    "openai-compatible",
+    "anvil"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/fakoli/openclaw-speech-to-speech.git"
@@ -11,7 +32,10 @@
   "files": [
     "dist",
     "openclaw.plugin.json",
-    "README.md"
+    "README.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",

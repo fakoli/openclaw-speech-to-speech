@@ -5,20 +5,20 @@ import anvilVoicePlugin from "./index.js";
 
 describe("anvil voice plugin entrypoint", () => {
   it("registers the Anvil realtime voice provider", () => {
-    let realtimeProvider: RealtimeVoiceProviderPlugin | undefined;
+    const realtimeProviders: RealtimeVoiceProviderPlugin[] = [];
 
     // Minimal stub of the plugin api; the entrypoint only calls
     // registerRealtimeVoiceProvider. (openclaw/plugin-sdk/plugin-test-api is
     // not exported from the published package.)
     const api = {
       registerRealtimeVoiceProvider(provider: RealtimeVoiceProviderPlugin) {
-        realtimeProvider = provider;
+        realtimeProviders.push(provider);
       },
     } as unknown as Parameters<typeof anvilVoicePlugin.register>[0];
 
     anvilVoicePlugin.register(api);
 
-    expect(realtimeProvider?.id).toBe("anvil");
-    expect(realtimeProvider?.label).toBe("Speech to Speech");
+    expect(realtimeProviders.map((provider) => provider.id)).toEqual(["anvil", "openai-cascade"]);
+    expect(realtimeProviders[0]?.label).toBe("Speech to Speech");
   });
 });

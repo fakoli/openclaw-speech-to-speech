@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build vanilla OpenClaw + fakoli core patches and point the global openclaw
+# Build the pinned legacy OpenClaw + optional fakoli core patches and point the global openclaw
 # symlink at the result. The speech-to-speech plugin itself stays external and
 # is loaded via the plugins load path in ~/.openclaw config (see
 # core-patches/README.md for the config migration).

@@ -5,5 +5,5 @@
     "outDir": "dist",
     "declaration": false
   },
-  "include": ["index.ts", "realtime-voice-provider.ts"]
+  "include": ["index.ts", "realtime-voice-provider.ts", "openai-cascade-voice-provider.ts"]
 }
