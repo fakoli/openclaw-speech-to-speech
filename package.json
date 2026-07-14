@@ -48,7 +48,7 @@
     "prepack": "npm run build"
   },
   "dependencies": {
-    "ws": "8.21.0"
+    "ws": "8.21.1"
   },
   "peerDependencies": {
     "openclaw": ">=2026.6.11"
