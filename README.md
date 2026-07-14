@@ -38,6 +38,15 @@ Runs against stock OpenClaw `>=2026.6.11` — no fork required.
 openclaw plugins install @fakoli/openclaw-speech-to-speech
 ```
 
+Or install the packaged tarball from the GitHub release:
+
+```bash
+gh release download v0.1.0 \
+  --repo fakoli/openclaw-speech-to-speech \
+  --pattern 'fakoli-openclaw-speech-to-speech-0.1.0.tgz'
+openclaw plugins install npm-pack:./fakoli-openclaw-speech-to-speech-0.1.0.tgz
+```
+
 Or from a local checkout while developing:
 
 ```bash
