@@ -1,7 +1,7 @@
 {
   "name": "@fakoli/openclaw-speech-to-speech",
   "version": "0.1.0",
-  "description": "Realtime speech-to-speech providers for OpenClaw using Anvil or user-owned OpenAI-compatible endpoints",
+  "description": "Realtime speech-to-speech providers for OpenClaw using Anvil Serving or user-owned OpenAI-compatible endpoints",
   "type": "module",
   "license": "MIT",
   "author": "Sekou Doumbouya",
@@ -34,6 +34,7 @@
     "openclaw.plugin.json",
     "README.md",
     "LICENSE",
+    "SECURITY.md",
     "THIRD_PARTY_NOTICES.md",
     "CHANGELOG.md"
   ],

@@ -114,6 +114,103 @@ describe("OpenAI-compatible speech-to-speech provider", () => {
     });
   });
 
+  it("preserves conversation context across completed text turns", async () => {
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ choices: [{ message: { content: "Nice to meet you, Ada." } }] })),
+      )
+      .mockResolvedValueOnce(new Response(Buffer.alloc(640, 1)))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ choices: [{ message: { content: "Your name is Ada." } }] })),
+      )
+      .mockResolvedValueOnce(new Response(Buffer.alloc(640, 1)));
+    vi.stubGlobal("fetch", fetchMock);
+    const onAudio = vi.fn<RealtimeVoiceBridgeCallbacks["onAudio"]>();
+    const bridge = buildOpenAICascadeVoiceProvider().createBridge({
+      providerConfig: standaloneConfig(),
+      instructions: "Answer briefly.",
+      audioFormat: REALTIME_VOICE_AUDIO_FORMAT_PCM16_24KHZ,
+      onAudio,
+      onClearAudio: vi.fn(),
+      onError: vi.fn(),
+    });
+
+    await bridge.connect();
+    bridge.sendUserMessage?.("My name is Ada.");
+    await waitForAssertion(() => expect(onAudio).toHaveBeenCalledTimes(1));
+    bridge.sendUserMessage?.("What is my name?");
+    await waitForAssertion(() => expect(onAudio).toHaveBeenCalledTimes(2));
+
+    expect(JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body)).messages).toEqual([
+      { role: "system", content: "Answer briefly." },
+      { role: "user", content: "My name is Ada." },
+      { role: "assistant", content: "Nice to meet you, Ada." },
+      { role: "user", content: "What is my name?" },
+    ]);
+  });
+
+  it("retains only the latest twelve conversation turns", async () => {
+    let reply = 0;
+    const fetchMock = vi.fn<typeof fetch>(async (_url, init) => {
+      const body = JSON.parse(String(init?.body));
+      if (Array.isArray(body.messages)) {
+        return new Response(
+          JSON.stringify({ choices: [{ message: { content: `reply-${reply++}` } }] }),
+        );
+      }
+      return new Response(Buffer.alloc(640, 1));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const onAudio = vi.fn<RealtimeVoiceBridgeCallbacks["onAudio"]>();
+    const bridge = buildOpenAICascadeVoiceProvider().createBridge({
+      providerConfig: standaloneConfig(),
+      audioFormat: REALTIME_VOICE_AUDIO_FORMAT_PCM16_24KHZ,
+      onAudio,
+      onClearAudio: vi.fn(),
+      onError: vi.fn(),
+    });
+
+    await bridge.connect();
+    for (let turn = 0; turn < 13; turn += 1) {
+      bridge.sendUserMessage?.(`turn-${turn}`);
+      await waitForAssertion(() => expect(onAudio).toHaveBeenCalledTimes(turn + 1));
+    }
+    bridge.sendUserMessage?.("final-turn");
+    await waitForAssertion(() => expect(onAudio).toHaveBeenCalledTimes(14));
+
+    const finalMessages = JSON.parse(String(fetchMock.mock.calls[26]?.[1]?.body)).messages;
+    expect(finalMessages).toHaveLength(25);
+    expect(finalMessages[0]).toEqual({ role: "user", content: "turn-1" });
+    expect(finalMessages.at(-1)).toEqual({ role: "user", content: "final-turn" });
+  });
+
+  it("rejects request deadlines that overflow Node.js timers", () => {
+    expect(() => buildOpenAICascadeVoiceProvider().createBridge({
+      providerConfig: standaloneConfig({ requestTimeoutMs: Number.MAX_SAFE_INTEGER }),
+      onAudio: vi.fn(),
+      onClearAudio: vi.fn(),
+    })).toThrow("requestTimeoutMs must be an integer between 1 and 2147483647 milliseconds");
+  });
+
+  it("rejects oversized input before mulaw decoding and resampling", async () => {
+    const fetchMock = vi.fn<typeof fetch>();
+    vi.stubGlobal("fetch", fetchMock);
+    const onError = vi.fn<NonNullable<RealtimeVoiceBridgeCallbacks["onError"]>>();
+    const bridge = buildOpenAICascadeVoiceProvider().createBridge({
+      providerConfig: standaloneConfig(),
+      onAudio: vi.fn(),
+      onClearAudio: vi.fn(),
+      onError,
+    });
+
+    await bridge.connect();
+    bridge.sendAudio(Buffer.alloc((2.5 * 1024 * 1024) + 1, 0x7f));
+
+    expect(onError).toHaveBeenCalledOnce();
+    expect(onError.mock.calls[0]?.[0].message).toContain("before conversion");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("times out a stalled upstream request", async () => {
     const fetchMock = vi.fn<typeof fetch>((_url, init) =>
       new Promise((_resolve, reject) => {

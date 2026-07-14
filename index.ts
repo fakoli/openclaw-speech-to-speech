@@ -6,7 +6,7 @@ import { buildAnvilRealtimeVoiceProvider } from "./realtime-voice-provider.js";
 export default definePluginEntry({
   id: "speech-to-speech",
   name: "Speech to Speech",
-  description: "Realtime speech-to-speech using Anvil or OpenAI-compatible endpoints",
+  description: "Realtime speech-to-speech using Anvil Serving or OpenAI-compatible endpoints",
   register(api) {
     api.registerRealtimeVoiceProvider(buildAnvilRealtimeVoiceProvider());
     api.registerRealtimeVoiceProvider(buildOpenAICascadeVoiceProvider());

@@ -1,7 +1,7 @@
 {
   "id": "speech-to-speech",
   "name": "Speech to Speech",
-  "description": "Realtime speech-to-speech over Anvil or user-owned OpenAI-compatible STT, LLM, and TTS endpoints",
+  "description": "Realtime speech-to-speech over Anvil Serving or user-owned OpenAI-compatible STT, LLM, and TTS endpoints",
   "activation": {
     "onStartup": false
   },
@@ -94,7 +94,9 @@
         "description": "TTS PCM response sample rate; defaults to 24000."
       },
       "requestTimeoutMs": {
-        "type": "number",
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 2147483647,
         "description": "Per-stage upstream request deadline in milliseconds; defaults to 60000."
       }
     }
